@@ -1,0 +1,549 @@
+# ============================================================================
+# SUBGROUP META-ANALYSIS BY VALIDATION TYPE (Internal vs External validation)
+# With Cochran's Q Test in Forest Plot, Begg's Test Plots, and PNG+PDF outputs
+# FIXED: Robust Begg's plot with fallback for lowess errors
+# ============================================================================
+
+# Load required libraries
+library(meta)
+library(metafor)
+library(forestplot)
+library(dplyr)
+library(tidyr)
+library(grid)
+
+# Read data
+data <- read.csv("meta_validation.csv", stringsAsFactors = FALSE)
+
+# Clean up whitespace in MainValidationType
+data$MainValidationType <- trimws(data$MainValidationType)
+
+# Standardize validation types
+data$ValidationCategory <- data$MainValidationType
+data$ValidationCategory[data$ValidationCategory == "Both"] <- "Internal validation"
+
+# Calculate standard error from confidence intervals
+data$se <- (data$UpperCI - data$LowerCI) / (2 * 1.96)
+
+# Remove any rows with missing SE or AUC
+data <- data[!is.na(data$se) & !is.na(data$AUC), ]
+
+# Define validation type categories
+validation_levels <- c("Internal validation", "External validation")
+
+# Verify which categories exist
+existing_validations <- unique(data$ValidationCategory)
+cat("Existing validation types in dataset:\n")
+print(existing_validations)
+
+# Use only existing categories
+validation_levels <- intersect(validation_levels, existing_validations)
+
+# Order data by validation type
+data$ValidationCategory <- factor(data$ValidationCategory, levels = validation_levels)
+data <- data[order(data$ValidationCategory, -data$AUC), ]
+
+# ============================================================================
+# PERFORM META-ANALYSIS FOR EACH VALIDATION TYPE
+# ============================================================================
+
+plot_data_list <- list()
+summary_stats <- list()
+row_counter <- 1
+
+for (val_type in validation_levels) {
+  subgroup_data <- data[data$ValidationCategory == val_type, ]
+  
+  cat(sprintf("\nProcessing %s: %d studies\n", val_type, nrow(subgroup_data)))
+  print(subgroup_data$Study)
+  
+  if (nrow(subgroup_data) > 0) {
+    # Add subgroup header row
+    plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
+      row_num = row_counter,
+      label_study = paste0("=== ", val_type, " ==="),
+      label_auc_ci = "",
+      auc = NA,
+      lower = NA,
+      upper = NA,
+      is_summary = TRUE,
+      validation_type = val_type,
+      is_header = TRUE
+    )
+    row_counter <- row_counter + 1
+    
+    # Individual study rows
+    for (i in 1:nrow(subgroup_data)) {
+      study <- subgroup_data[i, ]
+      plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
+        row_num = row_counter,
+        label_study = study$Study,
+        label_auc_ci = sprintf("%.3f [%.3f, %.3f]", study$AUC, study$LowerCI, study$UpperCI),
+        auc = study$AUC,
+        lower = study$LowerCI,
+        upper = study$UpperCI,
+        is_summary = FALSE,
+        validation_type = val_type,
+        is_header = FALSE
+      )
+      row_counter <- row_counter + 1
+    }
+    
+    # Meta-analysis if at least 2 studies
+    if (nrow(subgroup_data) >= 2) {
+      # Use metafor::rma for better control
+      meta_res <- rma(yi = AUC, sei = se, data = subgroup_data, method = "REML")
+      
+      # Format Cochran's Q test
+      if (meta_res$QEp < 0.001) {
+        cochran_q_text <- sprintf("Cochran's Q = %.2f (p < 0.001)", meta_res$QE)
+      } else {
+        cochran_q_text <- sprintf("Cochran's Q = %.2f (p = %.4f)", meta_res$QE, meta_res$QEp)
+      }
+      
+      # Combined heterogeneity statistics
+      combined_het_text <- sprintf("Heterogeneity: I² = %.1f%%  |  τ² = %.4f  |  %s", 
+                                   meta_res$I2, meta_res$tau2, cochran_q_text)
+      
+      # Add combined heterogeneity row
+      plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
+        row_num = row_counter,
+        label_study = combined_het_text,
+        label_auc_ci = "",
+        auc = NA,
+        lower = NA,
+        upper = NA,
+        is_summary = TRUE,
+        validation_type = val_type,
+        is_header = FALSE
+      )
+      row_counter <- row_counter + 1
+      
+      # Add random effects summary row
+      plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
+        row_num = row_counter,
+        label_study = "Random effects model",
+        label_auc_ci = sprintf("%.3f [%.3f; %.3f]", 
+                               meta_res$b, 
+                               meta_res$ci.lb, 
+                               meta_res$ci.ub),
+        auc = meta_res$b,
+        lower = meta_res$ci.lb,
+        upper = meta_res$ci.ub,
+        is_summary = TRUE,
+        validation_type = val_type,
+        is_header = FALSE
+      )
+      row_counter <- row_counter + 1
+      
+      # Store summary statistics
+      summary_stats[[val_type]] <- list(
+        meta = meta_res,
+        stats = data.frame(
+          ValidationType = val_type,
+          N_studies = nrow(subgroup_data),
+          AUC = round(meta_res$b, 3),
+          CI_Lower = round(meta_res$ci.lb, 3),
+          CI_Upper = round(meta_res$ci.ub, 3),
+          I2 = round(meta_res$I2, 1),
+          tau2 = round(meta_res$tau2, 4),
+          Cochran_Q = round(meta_res$QE, 2),
+          Q_pvalue = round(meta_res$QEp, 4)
+        )
+      )
+    } else if (nrow(subgroup_data) == 1) {
+      # For single study, just add note
+      plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
+        row_num = row_counter,
+        label_study = "(Single study - no meta-analysis)",
+        label_auc_ci = "",
+        auc = NA,
+        lower = NA,
+        upper = NA,
+        is_summary = TRUE,
+        validation_type = val_type,
+        is_header = FALSE
+      )
+      row_counter <- row_counter + 1
+      
+      summary_stats[[val_type]] <- list(
+        meta = NULL,
+        stats = data.frame(
+          ValidationType = val_type,
+          N_studies = 1,
+          AUC = round(subgroup_data$AUC[1], 3),
+          CI_Lower = round(subgroup_data$LowerCI[1], 3),
+          CI_Upper = round(subgroup_data$UpperCI[1], 3),
+          I2 = NA,
+          tau2 = NA,
+          Cochran_Q = NA,
+          Q_pvalue = NA
+        )
+      )
+    }
+    
+    # Add empty row for spacing after each subgroup (except last)
+    if (val_type != tail(validation_levels, 1)) {
+      plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
+        row_num = row_counter,
+        label_study = "",
+        label_auc_ci = "",
+        auc = NA,
+        lower = NA,
+        upper = NA,
+        is_summary = FALSE,
+        validation_type = val_type,
+        is_header = FALSE
+      )
+      row_counter <- row_counter + 1
+    }
+  }
+}
+
+# Combine all plot data
+plot_data_validation <- do.call(rbind, plot_data_list)
+
+# ============================================================================
+# CREATE FOREST PLOT (PDF & PNG)
+# ============================================================================
+
+labeltext_matrix_validation <- cbind(
+  plot_data_validation$label_study,
+  plot_data_validation$label_auc_ci
+)
+
+# PDF version
+pdf("validation_subgroup_forest_plot.pdf", width = 16, height = 12)
+
+forestplot(
+  labeltext = labeltext_matrix_validation,
+  mean = plot_data_validation$auc,
+  lower = plot_data_validation$lower,
+  upper = plot_data_validation$upper,
+  clip = c(0.5, 1.0),
+  vertices = TRUE,
+  xlog = FALSE,
+  boxsize = 0.2,
+  is.summary = plot_data_validation$is_summary,
+  xlab = "AUC",
+  zero = 0.5,
+  grid = TRUE,
+  title = "Subgroup Meta-analysis by Validation Type: AUC of Breast Cancer Risk Prediction Models",
+  xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+  graph.pos = 2,
+  txt_gp = fpTxtGp(
+    label = gpar(cex = 0.75),
+    summary = gpar(cex = 0.8, fontface = "bold"),
+    xlab = gpar(cex = 1)
+  ),
+  col = fpColors(
+    box = "hotpink3",
+    line = "lightsteelblue4",
+    summary = "red4",
+    zero = "deeppink3"
+  ),
+  lineheight = unit(0.7, "cm"),
+  colgap = unit(0.4, "cm")
+)
+
+dev.off()
+cat("✅ Forest plot (PDF) saved as 'validation_subgroup_forest_plot.pdf'\n")
+
+# PNG version
+png("validation_subgroup_forest_plot.png", width = 16, height = 12, units = "in", res = 300)
+
+forestplot(
+  labeltext = labeltext_matrix_validation,
+  mean = plot_data_validation$auc,
+  lower = plot_data_validation$lower,
+  upper = plot_data_validation$upper,
+  clip = c(0.5, 1.0),
+  vertices = TRUE,
+  xlog = FALSE,
+  boxsize = 0.2,
+  is.summary = plot_data_validation$is_summary,
+  xlab = "AUC",
+  zero = 0.5,
+  grid = TRUE,
+  title = "Subgroup Meta-analysis by Validation Type: AUC of Breast Cancer Risk Prediction Models",
+  xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+  graph.pos = 2,
+  txt_gp = fpTxtGp(
+    label = gpar(cex = 0.75),
+    summary = gpar(cex = 0.8, fontface = "bold"),
+    xlab = gpar(cex = 1)
+  ),
+  col = fpColors(
+    box = "hotpink3",
+    line = "lightsteelblue4",
+    summary = "red4",
+    zero = "deeppink3"
+  ),
+  lineheight = unit(0.7, "cm"),
+  colgap = unit(0.4, "cm")
+)
+
+dev.off()
+cat("✅ Forest plot (PNG) saved as 'validation_subgroup_forest_plot.png'\n")
+
+# ============================================================================
+# FUNNEL PLOTS, EGGER'S PLOTS, AND BEGG'S PLOTS (WITH ERROR HANDLING)
+# ============================================================================
+
+for (val_type in validation_levels) {
+  if (!is.null(summary_stats[[val_type]])) {
+    n_studies <- summary_stats[[val_type]]$stats$N_studies
+    subgroup_data <- data[data$ValidationCategory == val_type, ]
+    
+    if (n_studies >= 2) {
+      # Perform meta-analysis
+      meta_res <- rma(yi = AUC, sei = se, data = subgroup_data, method = "REML")
+      
+      auc_re <- meta_res$b
+      auc_ci_lb <- meta_res$ci.lb
+      auc_ci_ub <- meta_res$ci.ub
+      
+      # Egger's test
+      egger_test <- regtest(meta_res, model = "lm")
+      egger_pvalue <- egger_test$pval
+      
+      # Begg's test (Kendall's correlation)
+      begg_test <- cor.test(subgroup_data$AUC, subgroup_data$se^2, method = "kendall")
+      begg_pvalue <- begg_test$p.value
+      begg_tau <- begg_test$estimate
+      
+      # Egger's regression model
+      subgroup_data$precision <- 1 / subgroup_data$se
+      egger_model <- lm(AUC ~ precision, data = subgroup_data)
+      
+      # Clean validation type name for filename
+      val_filename <- gsub(" ", "_", val_type)
+      
+      # =========================
+      # 1. FUNNEL PLOT (PDF & PNG)
+      # =========================
+      
+      for (ext in c("pdf", "png")) {
+        if (ext == "pdf") {
+          pdf(paste0("Validation_Funnel_", val_filename, ".pdf"), width = 8, height = 8)
+        } else {
+          png(paste0("Validation_Funnel_", val_filename, ".png"), width = 8, height = 8, units = "in", res = 300)
+        }
+        
+        funnel(meta_res, 
+               xlab = "AUC",
+               ylab = "Standard Error",
+               main = paste("Funnel Plot -", val_type),
+               level = c(90, 95, 99),
+               shade = c("white", "lightblue", "lightpink"))
+        
+        legend_text <- c(
+          paste0("k = ", n_studies),
+          paste0("RE AUC = ", sprintf("%.3f", auc_re)),
+          paste0("95% CI [", sprintf("%.3f", auc_ci_lb), "-", sprintf("%.3f", auc_ci_ub), "]"),
+          paste0("I² = ", sprintf("%.1f", meta_res$I2), "%"),
+          paste0("Cochran's Q = ", sprintf("%.2f", meta_res$QE)),
+          paste0("Q-test p = ", sprintf("%.4f", meta_res$QEp)),
+          paste0(""),
+          paste0("Egger's test p = ", sprintf("%.4f", egger_pvalue)),
+          paste0("Begg's test p = ", sprintf("%.4f", begg_pvalue)),
+          paste0("Begg's τ = ", sprintf("%.3f", begg_tau))
+        )
+        
+        legend("topright", legend = legend_text, bty = "o", bg = "white", cex = 0.75)
+        dev.off()
+        cat(sprintf("  ✅ Funnel plot (%s) saved as 'Validation_Funnel_%s.%s'\n", toupper(ext), val_filename, ext))
+      }
+      
+      # =========================
+      # 2. EGGER'S REGRESSION PLOT (PDF & PNG)
+      # =========================
+      
+      for (ext in c("pdf", "png")) {
+        if (ext == "pdf") {
+          pdf(paste0("Validation_Egger_Plot_", val_filename, ".pdf"), width = 8, height = 8)
+        } else {
+          png(paste0("Validation_Egger_Plot_", val_filename, ".png"), width = 8, height = 8, units = "in", res = 300)
+        }
+        
+        plot(subgroup_data$precision, subgroup_data$AUC,
+             xlab = "Precision (1/Standard Error)",
+             ylab = "AUC",
+             main = paste("Egger's Regression Plot -", val_type),
+             pch = 19, col = "steelblue", cex = 1.2,
+             xlim = c(0, max(subgroup_data$precision, na.rm = TRUE) * 1.05),
+             ylim = c(0.5, 1.0))
+        
+        abline(egger_model, col = "darkred", lwd = 2)
+        abline(h = auc_re, col = "gray50", lty = 2, lwd = 1.5)
+        
+        legend_text2 <- c(
+          paste0("Egger's test: p = ", sprintf("%.4f", egger_pvalue)),
+          paste0("Begg's test: p = ", sprintf("%.4f", begg_pvalue)),
+          paste0("Begg's τ = ", sprintf("%.3f", begg_tau)),
+          paste0(""),
+          paste0("Cochran's Q = ", sprintf("%.2f", meta_res$QE)),
+          paste0("Q-test p = ", sprintf("%.4f", meta_res$QEp)),
+          paste0(""),
+          "Red line = Egger's regression",
+          "Dashed line = Pooled AUC"
+        )
+        
+        legend("bottomright", legend = legend_text2, bty = "o", bg = "white", cex = 0.75)
+        dev.off()
+        cat(sprintf("  ✅ Egger's plot (%s) saved as 'Validation_Egger_Plot_%s.%s'\n", toupper(ext), val_filename, ext))
+      }
+      
+      # =========================
+      # 3. BEGG'S TEST PLOT (PDF & PNG) - WITHOUT LOWESS
+      # =========================
+      
+      for (ext in c("pdf", "png")) {
+        if (ext == "pdf") {
+          pdf(paste0("Validation_Begg_Plot_", val_filename, ".pdf"), width = 8, height = 8)
+        } else {
+          png(paste0("Validation_Begg_Plot_", val_filename, ".png"), width = 8, height = 8, units = "in", res = 300)
+        }
+        
+        # Create scatter plot of AUC vs Variance (SE^2) for Begg's test
+        plot(subgroup_data$se^2, subgroup_data$AUC,
+             xlab = "Variance (Standard Error²)",
+             ylab = "AUC",
+             main = paste("Begg's Test Plot -", val_type),
+             pch = 19, col = "darkgreen", cex = 1.2,
+             xlim = c(0, max(subgroup_data$se^2, na.rm = TRUE) * 1.05),
+             ylim = c(0.5, 1.0))
+        
+        # Add horizontal line at pooled AUC
+        abline(h = auc_re, col = "gray50", lty = 2, lwd = 1.5)
+        
+        # Add a simple linear regression line instead of lowess (more robust)
+        if (length(unique(subgroup_data$se^2)) > 1) {
+          lm_line <- lm(AUC ~ se^2, data = subgroup_data)
+          abline(lm_line, col = "darkred", lwd = 1.5, lty = 3)
+        }
+        
+        legend_text3 <- c(
+          paste0("Begg's Test (Kendall's τ)"),
+          paste0("τ = ", sprintf("%.3f", begg_tau)),
+          paste0("p = ", sprintf("%.4f", begg_pvalue)),
+          paste0(""),
+          paste0("Interpretation:"),
+          ifelse(begg_pvalue < 0.05, "Significant correlation", "No significant correlation"),
+          paste0(""),
+          "Solid line = Pooled AUC",
+          ifelse(length(unique(subgroup_data$se^2)) > 1, "Dashed line = Linear fit", "")
+        )
+        
+        legend("bottomright", legend = legend_text3, bty = "o", bg = "white", cex = 0.75)
+        dev.off()
+        cat(sprintf("  ✅ Begg's plot (%s) saved as 'Validation_Begg_Plot_%s.%s'\n", toupper(ext), val_filename, ext))
+      }
+      
+      # Store publication bias results
+      summary_stats[[val_type]]$publication_bias <- list(
+        egger_pvalue = egger_pvalue,
+        begg_pvalue = begg_pvalue,
+        begg_tau = begg_tau
+      )
+      
+    } else if (n_studies == 1) {
+      cat(sprintf("\n⚠️ %s: Only 1 study - plots not created\n", val_type))
+    }
+  }
+}
+
+# ============================================================================
+# PRINT SUMMARY STATISTICS
+# ============================================================================
+
+cat("\n\n========================================\n")
+cat("SUBGROUP META-ANALYSIS SUMMARY BY VALIDATION TYPE\n")
+cat("========================================\n\n")
+
+for (val_type in validation_levels) {
+  if (!is.null(summary_stats[[val_type]])) {
+    stats <- summary_stats[[val_type]]$stats
+    cat(sprintf("\n%s:\n", stats$ValidationType))
+    cat(sprintf("  Number of studies: %d\n", stats$N_studies))
+    cat(sprintf("  Pooled AUC (Random Effects): %.3f (95%% CI: %.3f-%.3f)\n", 
+                stats$AUC, stats$CI_Lower, stats$CI_Upper))
+    if (stats$N_studies >= 2) {
+      cat(sprintf("  I²: %.1f%%\n", stats$I2))
+      cat(sprintf("  τ²: %.4f\n", stats$tau2))
+      cat(sprintf("  Cochran's Q: %.2f (p = %.4f)\n", stats$Cochran_Q, stats$Q_pvalue))
+      
+      if (!is.null(summary_stats[[val_type]]$publication_bias)) {
+        pb <- summary_stats[[val_type]]$publication_bias
+        cat(sprintf("  Egger's test: p = %.4f\n", pb$egger_pvalue))
+        cat(sprintf("  Begg's test: τ = %.3f, p = %.4f\n", pb$begg_tau, pb$begg_pvalue))
+      }
+    }
+    cat("  ----------------------------------------\n")
+  }
+}
+
+# ============================================================================
+# SAVE SUMMARY STATISTICS TO CSV
+# ============================================================================
+
+summary_df <- data.frame()
+
+for (val_type in validation_levels) {
+  if (!is.null(summary_stats[[val_type]])) {
+    stats <- summary_stats[[val_type]]$stats
+    df_row <- stats
+    
+    if (!is.null(summary_stats[[val_type]]$publication_bias)) {
+      pb <- summary_stats[[val_type]]$publication_bias
+      df_row$Egger_p <- pb$egger_pvalue
+      df_row$Begg_tau <- pb$begg_tau
+      df_row$Begg_p <- pb$begg_pvalue
+    } else {
+      df_row$Egger_p <- NA
+      df_row$Begg_tau <- NA
+      df_row$Begg_p <- NA
+    }
+    
+    summary_df <- rbind(summary_df, df_row)
+  }
+}
+
+write.csv(summary_df, "validation_subgroup_summary.csv", row.names = FALSE)
+cat("\n\n✅ Summary statistics saved to 'validation_subgroup_summary.csv'\n")
+
+# ============================================================================
+# BETWEEN-GROUP DIFFERENCE TEST (META-REGRESSION)
+# ============================================================================
+
+cat("\n\n========================================\n")
+cat("BETWEEN-GROUP DIFFERENCE TEST\n")
+cat("========================================\n")
+
+subgroups_for_comparison <- validation_levels[sapply(validation_levels, function(v) {
+  !is.null(summary_stats[[v]]) && summary_stats[[v]]$stats$N_studies >= 2
+})]
+
+if (length(subgroups_for_comparison) >= 2) {
+  comparison_data <- data.frame()
+  for (val_type in subgroups_for_comparison) {
+    subgroup_data <- data[data$ValidationCategory == val_type, ]
+    subgroup_data$ValidationTypeFactor <- val_type
+    comparison_data <- rbind(comparison_data, subgroup_data)
+  }
+  
+  meta_reg <- rma(yi = AUC, sei = se, mods = ~ ValidationTypeFactor, data = comparison_data, method = "REML")
+  
+  cat("\nMeta-regression results (testing differences between validation types):\n")
+  cat(sprintf("  QM (test for moderators): %.2f, p = %.4f\n", meta_reg$QM, meta_reg$QMp))
+  
+  if (meta_reg$QMp < 0.05) {
+    cat("  Interpretation: Significant differences between internal and external validation\n")
+  } else {
+    cat("  Interpretation: No significant differences between internal and external validation\n")
+  }
+} else {
+  cat("\nInsufficient subgroups with ≥2 studies for between-group comparison\n")
+}
+
+cat("\n✅ All analyses complete!\n")
