@@ -1,0 +1,263 @@
+# ----------------------------------------------------
+# OUTLIER DETECTION AND REMOVAL 
+# ----------------------------------------------------
+
+# Load required packages
+library(metafor)
+library(dplyr)
+library(writexl)
+library(forestplot)
+
+# ----------------------------------------------------
+# PART 1: ORIGINAL ANALYSIS (29 studies from meta_auc.csv)
+# ----------------------------------------------------
+
+# Load original data
+meta_data_original <- read.csv("meta_auc.csv", stringsAsFactors = FALSE)
+
+# Clean up whitespace
+meta_data_original <- meta_data_original %>%
+  mutate(
+    Study = trimws(Study),
+    PredictorType = trimws(PredictorType),
+    ModelType = trimws(ModelType),
+    MainValidationType = trimws(MainValidationType),
+    ValidationMethod = trimws(ValidationMethod),
+    StudyDesign = trimws(StudyDesign)
+  )
+
+# Calculate Standard Error
+meta_data_original$SE <- (meta_data_original$UpperCI - meta_data_original$LowerCI) / (2 * 1.96)
+
+# Run original meta-analysis (29 studies)
+random_model_original <- rma(yi = AUC, sei = SE, data = meta_data_original, method = "REML")
+fixed_model_original <- rma(yi = AUC, sei = SE, data = meta_data_original, method = "FE")
+
+# Extract original heterogeneity
+I2_original <- random_model_original$I2
+tau2_original <- random_model_original$tau2
+Q_original <- random_model_original$QE
+Q_pval_original <- random_model_original$QEp
+
+cat("\n========== ORIGINAL META-ANALYSIS (29 studies from meta_auc.csv) ==========\n")
+cat(sprintf("Random Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            random_model_original$b, random_model_original$ci.lb, random_model_original$ci.ub))
+cat(sprintf("Fixed Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            fixed_model_original$b, fixed_model_original$ci.lb, fixed_model_original$ci.ub))
+cat(sprintf("I² = %.1f%%, τ² = %.4f\n", I2_original, tau2_original))
+cat(sprintf("Cochran's Q = %.2f (p = %.4f)\n", Q_original, Q_pval_original))
+cat("============================================================================\n\n")
+
+# ----------------------------------------------------
+# PART 2: SENSITIVITY ANALYSIS (24 studies from meta_sen.csv)
+# ----------------------------------------------------
+
+# Load sensitivity data (after removing high RoB studies)
+meta_data_sensitivity <- read.csv("meta_sen.csv", stringsAsFactors = FALSE)
+
+# Clean up whitespace
+meta_data_sensitivity <- meta_data_sensitivity %>%
+  mutate(
+    Study = trimws(Study),
+    PredictorType = trimws(PredictorType),
+    ModelType = trimws(ModelType),
+    MainValidationType = trimws(MainValidationType),
+    ValidationMethod = trimws(ValidationMethod),
+    StudyDesign = trimws(StudyDesign)
+  )
+
+# Calculate Standard Error
+meta_data_sensitivity$SE <- (meta_data_sensitivity$UpperCI - meta_data_sensitivity$LowerCI) / (2 * 1.96)
+
+# Run sensitivity meta-analysis (24 studies)
+random_model_sensitivity <- rma(yi = AUC, sei = SE, data = meta_data_sensitivity, method = "REML")
+fixed_model_sensitivity <- rma(yi = AUC, sei = SE, data = meta_data_sensitivity, method = "FE")
+
+# Extract sensitivity heterogeneity
+I2_sensitivity <- random_model_sensitivity$I2
+tau2_sensitivity <- random_model_sensitivity$tau2
+Q_sensitivity <- random_model_sensitivity$QE
+Q_pval_sensitivity <- random_model_sensitivity$QEp
+
+cat("========== SENSITIVITY META-ANALYSIS (24 studies from meta_sen.csv) ==========\n")
+cat(sprintf("Random Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            random_model_sensitivity$b, random_model_sensitivity$ci.lb, random_model_sensitivity$ci.ub))
+cat(sprintf("Fixed Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            fixed_model_sensitivity$b, fixed_model_sensitivity$ci.lb, fixed_model_sensitivity$ci.ub))
+cat(sprintf("I² = %.1f%%, τ² = %.4f\n", I2_sensitivity, tau2_sensitivity))
+cat(sprintf("Cochran's Q = %.2f (p = %.4f)\n", Q_sensitivity, Q_pval_sensitivity))
+cat("===============================================================================\n\n")
+
+# ----------------------------------------------------
+# PART 3: Outlier Detection on SENSITIVITY data (24 studies)
+# ----------------------------------------------------
+
+cat("\n========== OUTLIER DETECTION ON SENSITIVITY DATA (24 studies) ==========\n")
+
+# Method 1: Boxplot statistics (IQR method)
+Q1 <- quantile(meta_data_sensitivity$AUC, 0.25)
+Q3 <- quantile(meta_data_sensitivity$AUC, 0.75)
+IQR_val <- Q3 - Q1
+lower_bound <- Q1 - 1.5 * IQR_val
+upper_bound <- Q3 + 1.5 * IQR_val
+
+meta_data_sensitivity$is_outlier_iqr <- meta_data_sensitivity$AUC < lower_bound | meta_data_sensitivity$AUC > upper_bound
+
+cat("\n=== Outlier Detection (IQR Method) ===\n")
+cat(sprintf("Q1 (25th percentile): %.3f\n", Q1))
+cat(sprintf("Q3 (75th percentile): %.3f\n", Q3))
+cat(sprintf("IQR: %.3f\n", IQR_val))
+cat(sprintf("Lower bound: %.3f\n", lower_bound))
+cat(sprintf("Upper bound: %.3f\n", upper_bound))
+cat("\nOutliers identified:\n")
+print(meta_data_sensitivity[meta_data_sensitivity$is_outlier_iqr, c("Study", "AUC")])
+
+# Method 2: Z-score method
+mean_auc <- mean(meta_data_sensitivity$AUC)
+sd_auc <- sd(meta_data_sensitivity$AUC)
+meta_data_sensitivity$z_score <- (meta_data_sensitivity$AUC - mean_auc) / sd_auc
+meta_data_sensitivity$is_outlier_zscore <- abs(meta_data_sensitivity$z_score) > 2
+
+cat("\n=== Outlier Detection (Z-score Method) ===\n")
+cat(sprintf("Mean AUC: %.3f\n", mean_auc))
+cat(sprintf("SD AUC: %.3f\n", sd_auc))
+cat("\nOutliers (|z| > 2):\n")
+print(meta_data_sensitivity[meta_data_sensitivity$is_outlier_zscore, c("Study", "AUC", "z_score")])
+
+# Method 3: Cook's distance (influential studies)
+cooks_distances <- cooks.distance(random_model_sensitivity)
+meta_data_sensitivity$cooks_d <- cooks_distances
+threshold <- 4 / nrow(meta_data_sensitivity)
+meta_data_sensitivity$is_influential <- meta_data_sensitivity$cooks_d > threshold
+
+cat("\n=== Influential Studies (Cook's Distance) ===\n")
+cat(sprintf("Threshold (4/n = 4/%d): %.4f\n", nrow(meta_data_sensitivity), threshold))
+cat("\nInfluential studies:\n")
+print(meta_data_sensitivity[meta_data_sensitivity$is_influential, c("Study", "AUC", "cooks_d")])
+
+# ----------------------------------------------------
+# PART 4: Remove outliers from SENSITIVITY data and re-run
+# ----------------------------------------------------
+
+# Choose outliers to remove (based on the methods above)
+# Based on your data, potential outliers:
+# - High AUC: Ming 2020 (0.889), Pfob 2022 (0.900), Ko 2023 (0.836), Niu 2025 (0.871), Yeoh 2023 (0.866)
+# - Low AUC: Perez Benito 2019 (0.614), Avendano 2024 (0.630)
+
+studies_to_remove <- c("Ming 2020", "Pfob 2022", "Perez Benito 2019", "Ko 2023", "Niu 2025", "Yeoh 2023", "Avendano 2024")
+
+# Create filtered dataset
+meta_data_sensitivity_no_outliers <- meta_data_sensitivity %>%
+  filter(!(Study %in% studies_to_remove))
+
+cat("\n=== Removing Outliers from Sensitivity Analysis ===\n")
+cat(sprintf("Removed %d studies\n", length(studies_to_remove)))
+cat("Removed studies:", paste(studies_to_remove, collapse = ", "), "\n")
+cat(sprintf("Original sensitivity studies: %d\n", nrow(meta_data_sensitivity)))
+cat(sprintf("Studies after outlier removal: %d\n", nrow(meta_data_sensitivity_no_outliers)))
+
+# Re-run meta-analysis without outliers
+random_model_sens_no_outliers <- rma(yi = AUC, sei = SE, data = meta_data_sensitivity_no_outliers, method = "REML")
+fixed_model_sens_no_outliers <- rma(yi = AUC, sei = SE, data = meta_data_sensitivity_no_outliers, method = "FE")
+
+I2_sens_no_outliers <- random_model_sens_no_outliers$I2
+tau2_sens_no_outliers <- random_model_sens_no_outliers$tau2
+Q_sens_no_outliers <- random_model_sens_no_outliers$QE
+Q_pval_sens_no_outliers <- random_model_sens_no_outliers$QEp
+
+# ----------------------------------------------------
+# PART 5: Compare all results
+# ----------------------------------------------------
+
+cat("\n\n========== COMPLETE COMPARISON OF ALL ANALYSES ==========\n")
+
+cat("\n--- ORIGINAL ANALYSIS (29 studies, meta_auc.csv) ---\n")
+cat(sprintf("Random Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            random_model_original$b, random_model_original$ci.lb, random_model_original$ci.ub))
+cat(sprintf("Fixed Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            fixed_model_original$b, fixed_model_original$ci.lb, fixed_model_original$ci.ub))
+cat(sprintf("I² = %.1f%%, τ² = %.4f\n", I2_original, tau2_original))
+
+cat("\n--- SENSITIVITY ANALYSIS (24 studies, meta_sen.csv) ---\n")
+cat(sprintf("Random Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            random_model_sensitivity$b, random_model_sensitivity$ci.lb, random_model_sensitivity$ci.ub))
+cat(sprintf("Fixed Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            fixed_model_sensitivity$b, fixed_model_sensitivity$ci.lb, fixed_model_sensitivity$ci.ub))
+cat(sprintf("I² = %.1f%%, τ² = %.4f\n", I2_sensitivity, tau2_sensitivity))
+
+cat("\n--- SENSITIVITY ANALYSIS AFTER OUTLIER REMOVAL (n=", nrow(meta_data_sensitivity_no_outliers), ") ---\n")
+cat(sprintf("Random Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            random_model_sens_no_outliers$b, random_model_sens_no_outliers$ci.lb, random_model_sens_no_outliers$ci.ub))
+cat(sprintf("Fixed Effects AUC: %.4f (95%% CI: %.4f-%.4f)\n", 
+            fixed_model_sens_no_outliers$b, fixed_model_sens_no_outliers$ci.lb, fixed_model_sens_no_outliers$ci.ub))
+cat(sprintf("I² = %.1f%%, τ² = %.4f\n", I2_sens_no_outliers, tau2_sens_no_outliers))
+
+# Calculate changes
+re_change_sensitivity <- ((random_model_sensitivity$b - random_model_original$b) / random_model_original$b) * 100
+re_change_outliers <- ((random_model_sens_no_outliers$b - random_model_sensitivity$b) / random_model_sensitivity$b) * 100
+
+cat("\n--- INTERPRETATION ---\n")
+cat(sprintf("Removing 5 high RoB studies changed RE AUC by: %.1f%%\n", re_change_sensitivity))
+cat(sprintf("Removing additional outliers changed RE AUC by: %.1f%%\n", re_change_outliers))
+cat("========================================================================\n\n")
+
+# ----------------------------------------------------
+# PART 6: Export results to Excel
+# ----------------------------------------------------
+
+comparison_results <- list(
+  "Original_Analysis_29studies" = data.frame(
+    Model = c("Random Effects", "Fixed Effects"),
+    AUC = c(sprintf("%.4f", random_model_original$b), sprintf("%.4f", fixed_model_original$b)),
+    CI_Lower = c(sprintf("%.4f", random_model_original$ci.lb), sprintf("%.4f", fixed_model_original$ci.lb)),
+    CI_Upper = c(sprintf("%.4f", random_model_original$ci.ub), sprintf("%.4f", fixed_model_original$ci.ub)),
+    I_Squared = c(sprintf("%.1f%%", I2_original), sprintf("%.1f%%", I2_original)),
+    Tau_Squared = c(sprintf("%.4f", tau2_original), sprintf("%.4f", tau2_original))
+  ),
+  
+  "Sensitivity_Analysis_24studies" = data.frame(
+    Model = c("Random Effects", "Fixed Effects"),
+    AUC = c(sprintf("%.4f", random_model_sensitivity$b), sprintf("%.4f", fixed_model_sensitivity$b)),
+    CI_Lower = c(sprintf("%.4f", random_model_sensitivity$ci.lb), sprintf("%.4f", fixed_model_sensitivity$ci.lb)),
+    CI_Upper = c(sprintf("%.4f", random_model_sensitivity$ci.ub), sprintf("%.4f", fixed_model_sensitivity$ci.ub)),
+    I_Squared = c(sprintf("%.1f%%", I2_sensitivity), sprintf("%.1f%%", I2_sensitivity)),
+    Tau_Squared = c(sprintf("%.4f", tau2_sensitivity), sprintf("%.4f", tau2_sensitivity))
+  ),
+  
+  "Sensitivity_After_Outlier_Removal" = data.frame(
+    Model = c("Random Effects", "Fixed Effects"),
+    AUC = c(sprintf("%.4f", random_model_sens_no_outliers$b), sprintf("%.4f", fixed_model_sens_no_outliers$b)),
+    CI_Lower = c(sprintf("%.4f", random_model_sens_no_outliers$ci.lb), sprintf("%.4f", fixed_model_sens_no_outliers$ci.lb)),
+    CI_Upper = c(sprintf("%.4f", random_model_sens_no_outliers$ci.ub), sprintf("%.4f", fixed_model_sens_no_outliers$ci.ub)),
+    I_Squared = c(sprintf("%.1f%%", I2_sens_no_outliers), sprintf("%.1f%%", I2_sens_no_outliers)),
+    Tau_Squared = c(sprintf("%.4f", tau2_sens_no_outliers), sprintf("%.4f", tau2_sens_no_outliers))
+  ),
+  
+  "Outliers_Removed_from_Sensitivity" = data.frame(
+    Study = studies_to_remove,
+    AUC = sapply(studies_to_remove, function(x) meta_data_sensitivity$AUC[meta_data_sensitivity$Study == x][1])
+  ),
+  
+  "Heterogeneity_Comparison" = data.frame(
+    Analysis = c("Original (29 studies)", "Sensitivity (24 studies)", "Sensitivity - Outliers Removed"),
+    I_Squared = c(sprintf("%.1f%%", I2_original), sprintf("%.1f%%", I2_sensitivity), sprintf("%.1f%%", I2_sens_no_outliers)),
+    Tau_Squared = c(sprintf("%.4f", tau2_original), sprintf("%.4f", tau2_sensitivity), sprintf("%.4f", tau2_sens_no_outliers)),
+    Cochran_Q = c(sprintf("%.2f", Q_original), sprintf("%.2f", Q_sensitivity), sprintf("%.2f", Q_sens_no_outliers)),
+    P_Value = c(sprintf("%.4f", Q_pval_original), sprintf("%.4f", Q_pval_sensitivity), sprintf("%.4f", Q_pval_sens_no_outliers))
+  )
+)
+
+write_xlsx(comparison_results, "complete_meta_analysis_comparison.xlsx")
+cat("\n Complete comparison exported to 'complete_meta_analysis_comparison.xlsx'\n")
+
+cat("\n All analyses completed successfully!\n")
+cat("\nSummary of files created:\n")
+cat("  - complete_meta_analysis_comparison.xlsx (Excel file with all results)\n")
+cat("\nKey findings:\n")
+cat(sprintf("  • Original (29 studies): RE AUC = %.4f, FE AUC = %.4f, I² = %.1f%%\n", 
+            random_model_original$b, fixed_model_original$b, I2_original))
+cat(sprintf("  • Sensitivity (24 studies): RE AUC = %.4f, FE AUC = %.4f, I² = %.1f%%\n", 
+            random_model_sensitivity$b, fixed_model_sensitivity$b, I2_sensitivity))
+cat(sprintf("  • After outlier removal: RE AUC = %.4f, FE AUC = %.4f, I² = %.1f%%\n", 
+            random_model_sens_no_outliers$b, fixed_model_sens_no_outliers$b, I2_sens_no_outliers))
+
