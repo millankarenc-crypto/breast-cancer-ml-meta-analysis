@@ -1,0 +1,360 @@
+# ============================================================================
+# META-REGRESSION ANALYSIS FOR ALL SUBGROUPS
+# Breast Cancer Risk Prediction Models
+# ============================================================================
+
+# Load required libraries
+library(metafor)
+library(dplyr)
+library(readr)
+
+# ============================================================================
+# 1. MAIN META-ANALYSIS (meta_auc.csv)
+# ============================================================================
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("META-REGRESSION 1: MAIN META-ANALYSIS (meta_auc.csv)\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+data_main <- read.csv("meta_auc.csv", stringsAsFactors = FALSE)
+
+# Calculate standard error
+data_main$se <- (data_main$UpperCI - data_main$LowerCI) / (2 * 1.96)
+
+# Remove any rows with missing values
+data_main <- data_main[!is.na(data_main$se) & !is.na(data_main$AUC), ]
+
+cat(sprintf("Number of studies in main MA: %d\n\n", nrow(data_main)))
+
+# Main model (no moderators)
+main_model <- rma(yi = AUC, sei = se, data = data_main, method = "REML")
+cat("=== Main Model (No Moderators) ===\n")
+cat(sprintf("Pooled AUC: %.3f (95%% CI: %.3f-%.3f)\n", 
+            main_model$b, main_model$ci.lb, main_model$ci.ub))
+cat(sprintf("I² = %.1f%%, τ² = %.4f\n\n", main_model$I2, main_model$tau2))
+
+# --------------------------------------------------------------------------
+# 1.1 Meta-regression: Model Type (DL, ML, Hybrid)
+# --------------------------------------------------------------------------
+cat("=== Meta-regression: Model Type ===\n")
+
+if ("ModelType" %in% colnames(data_main)) {
+  data_main$ModelType <- trimws(data_main$ModelType)
+  data_main$ModelTypeFactor <- as.factor(data_main$ModelType)
+  data_main$ModelTypeFactor <- relevel(data_main$ModelTypeFactor, ref = "ML")
+  
+  reg_model <- rma(yi = AUC, sei = se, mods = ~ ModelTypeFactor, data = data_main, method = "REML")
+  cat(sprintf("QM (test for overall model type effect): %.2f, p = %.4f\n", reg_model$QM, reg_model$QMp))
+  
+  if (reg_model$QMp < 0.05) {
+    cat("Significant differences between model types found.\n")
+    # Print coefficients
+    coef_summary <- summary(reg_model)
+    print(coef_summary$coefficients)
+  } else {
+    cat("No significant differences between model types.\n")
+  }
+  cat("\n")
+}
+
+# --------------------------------------------------------------------------
+# 1.2 Meta-regression: Predictor Type (Clinical, Imaging, Genomic, Multimodal)
+# --------------------------------------------------------------------------
+cat("=== Meta-regression: Predictor Type ===\n")
+
+if ("PredictorType" %in% colnames(data_main)) {
+  data_main$PredictorType <- trimws(data_main$PredictorType)
+  # Create simplified categories
+  data_main$PredCategory <- data_main$PredictorType
+  data_main$PredCategory[grepl("Clinical and", data_main$PredCategory)] <- "Multimodal"
+  data_main$PredCategory[grepl("Clinical and Genomic", data_main$PredCategory)] <- "Multimodal"
+  data_main$PredCategory <- as.factor(data_main$PredCategory)
+  data_main$PredCategory <- relevel(data_main$PredCategory, ref = "Clinical")
+  
+  if (length(unique(data_main$PredCategory)) > 1) {
+    reg_predictor <- rma(yi = AUC, sei = se, mods = ~ PredCategory, data = data_main, method = "REML")
+    cat(sprintf("QM (test for overall predictor type effect): %.2f, p = %.4f\n", 
+                reg_predictor$QM, reg_predictor$QMp))
+    
+    if (reg_predictor$QMp < 0.05) {
+      cat("Significant differences between predictor types found.\n")
+    } else {
+      cat("No significant differences between predictor types.\n")
+    }
+  } else {
+    cat("Only one predictor category available.\n")
+  }
+  cat("\n")
+}
+
+# --------------------------------------------------------------------------
+# 1.3 Meta-regression: Validation Type (Internal vs External)
+# --------------------------------------------------------------------------
+cat("=== Meta-regression: Validation Type ===\n")
+
+if ("MainValidationType" %in% colnames(data_main)) {
+  data_main$MainValidationType <- trimws(data_main$MainValidationType)
+  data_main$ValidationNumeric <- ifelse(data_main$MainValidationType == "External validation" | 
+                                          data_main$MainValidationType == "External Validation", 1, 0)
+  data_main$ValidationNumeric[data_main$MainValidationType == "Both"] <- 0  # Treat as internal for this analysis
+  
+  if (length(unique(data_main$ValidationNumeric)) > 1) {
+    reg_validation <- rma(yi = AUC, sei = se, mods = ~ ValidationNumeric, data = data_main, method = "REML")
+    cat(sprintf("QM (test for validation type effect): %.2f, p = %.4f\n", reg_validation$QM, reg_validation$QMp))
+    cat(sprintf("Coefficient for External validation (vs Internal): %.3f (95%% CI: %.3f-%.3f), p = %.4f\n",
+                reg_validation$b[2], reg_validation$ci.lb[2], reg_validation$ci.ub[2], reg_validation$pval[2]))
+  } else {
+    cat("Only one validation type available.\n")
+  }
+  cat("\n")
+}
+
+# ============================================================================
+# 2. VALIDATION TYPE SUBGROUP (meta_validation.csv)
+# ============================================================================
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("META-REGRESSION 2: VALIDATION TYPE SUBGROUP (meta_validation.csv)\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+data_val <- read.csv("meta_validation.csv", stringsAsFactors = FALSE)
+data_val$se <- (data_val$UpperCI - data_val$LowerCI) / (2 * 1.96)
+data_val <- data_val[!is.na(data_val$se) & !is.na(data_val$AUC), ]
+
+cat(sprintf("Number of validation entries: %d (Internal + External)\n", nrow(data_val)))
+cat("Note: Liu 2024 appears twice (internal and external validation)\n\n")
+
+# Test if validation type predicts AUC (using all data, treating validation as moderator)
+data_val$ValidationCategory <- trimws(data_val$MainValidationType)
+data_val$ValidationNumeric <- ifelse(data_val$ValidationCategory == "External validation" | 
+                                       data_val$ValidationCategory == "External Validation", 1, 0)
+
+reg_val_main <- rma(yi = AUC, sei = se, mods = ~ ValidationNumeric, data = data_val, method = "REML")
+cat("=== Does validation type predict AUC? ===\n")
+cat(sprintf("QM = %.2f, p = %.4f\n", reg_val_main$QM, reg_val_main$QMp))
+cat(sprintf("External vs Internal: β = %.3f (95%% CI: %.3f-%.3f), p = %.4f\n",
+            reg_val_main$b[2], reg_val_main$ci.lb[2], reg_val_main$ci.ub[2], reg_val_main$pval[2]))
+
+# Separate meta-analyses for each validation type
+cat("\n=== Separate Meta-Analyses by Validation Type ===\n")
+
+# Internal validation only
+internal_data <- data_val[data_val$ValidationNumeric == 0, ]
+if (nrow(internal_data) >= 2) {
+  internal_model <- rma(yi = AUC, sei = se, data = internal_data, method = "REML")
+  cat(sprintf("Internal validation (k=%d): AUC = %.3f (95%% CI: %.3f-%.3f), I² = %.1f%%\n",
+              nrow(internal_data), internal_model$b, internal_model$ci.lb, internal_model$ci.ub, internal_model$I2))
+}
+
+# External validation only
+external_data <- data_val[data_val$ValidationNumeric == 1, ]
+if (nrow(external_data) >= 2) {
+  external_model <- rma(yi = AUC, sei = se, data = external_data, method = "REML")
+  cat(sprintf("External validation (k=%d): AUC = %.3f (95%% CI: %.3f-%.3f), I² = %.1f%%\n",
+              nrow(external_data), external_model$b, external_model$ci.lb, external_model$ci.ub, external_model$I2))
+}
+
+# ============================================================================
+# 3. MODEL TYPE SUBGROUP (meta_model.csv)
+# ============================================================================
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("META-REGRESSION 3: MODEL TYPE SUBGROUP (meta_model.csv)\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+data_model <- read.csv("meta_model.csv", stringsAsFactors = FALSE)
+data_model$se <- (data_model$UpperCI - data_model$LowerCI) / (2 * 1.96)
+data_model <- data_model[!is.na(data_model$se) & !is.na(data_model$AUC), ]
+
+data_model$ModelType <- trimws(data_model$ModelType)
+data_model$ModelTypeFactor <- as.factor(data_model$ModelType)
+data_model$ModelTypeFactor <- relevel(data_model$ModelTypeFactor, ref = "ML")
+
+cat(sprintf("Number of studies by model type:\n"))
+table(data_model$ModelType)
+
+reg_model_sub <- rma(yi = AUC, sei = se, mods = ~ ModelTypeFactor, data = data_model, method = "REML")
+cat("\n=== Does model type predict AUC? ===\n")
+cat(sprintf("QM (test for overall model type effect): %.2f, p = %.4f\n", reg_model_sub$QM, reg_model_sub$QMp))
+
+if (reg_model_sub$QMp < 0.05) {
+  cat("Significant differences between model types found.\n")
+  cat("\nPairwise comparisons (vs ML as reference):\n")
+  if ("DL" %in% levels(data_model$ModelTypeFactor)) {
+    cat(sprintf("  DL vs ML: β = %.3f (95%% CI: %.3f-%.3f), p = %.4f\n",
+                reg_model_sub$b[2], reg_model_sub$ci.lb[2], reg_model_sub$ci.ub[2], reg_model_sub$pval[2]))
+  }
+  if ("Hybrid" %in% levels(data_model$ModelTypeFactor)) {
+    idx <- ifelse("DL" %in% levels(data_model$ModelTypeFactor), 3, 2)
+    cat(sprintf("  Hybrid vs ML: β = %.3f (95%% CI: %.3f-%.3f), p = %.4f\n",
+                reg_model_sub$b[idx], reg_model_sub$ci.lb[idx], reg_model_sub$ci.ub[idx], reg_model_sub$pval[idx]))
+  }
+} else {
+  cat("No significant differences between model types.\n")
+}
+
+# ============================================================================
+# 4. PREDICTOR TYPE SUBGROUP (meta_predictor.csv)
+# ============================================================================
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("META-REGRESSION 4: PREDICTOR TYPE SUBGROUP (meta_predictor.csv)\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+data_pred <- read.csv("meta_predictor.csv", stringsAsFactors = FALSE)
+data_pred$se <- (data_pred$UpperCI - data_pred$LowerCI) / (2 * 1.96)
+data_pred <- data_pred[!is.na(data_pred$se) & !is.na(data_pred$AUC), ]
+
+# Simplify predictor categories
+data_pred$PredictorType <- trimws(data_pred$PredictorType)
+data_pred$PredCategory <- data_pred$PredictorType
+data_pred$PredCategory[data_pred$PredCategory == "Clinical and Imaging "] <- "Multimodal"
+data_pred$PredCategory[data_pred$PredCategory == "Clinical and Genomic"] <- "Multimodal"
+data_pred$PredCategory[data_pred$PredCategory == "Imaging and Clinical"] <- "Multimodal"
+data_pred$PredCategory <- as.factor(data_pred$PredCategory)
+
+cat("Predictor category distribution:\n")
+print(table(data_pred$PredCategory))
+
+# Set Clinical as reference
+if ("Clinical" %in% levels(data_pred$PredCategory)) {
+  data_pred$PredCategory <- relevel(data_pred$PredCategory, ref = "Clinical")
+}
+
+if (length(unique(data_pred$PredCategory)) > 1) {
+  reg_pred_sub <- rma(yi = AUC, sei = se, mods = ~ PredCategory, data = data_pred, method = "REML")
+  cat("\n=== Does predictor type predict AUC? ===\n")
+  cat(sprintf("QM (test for overall predictor type effect): %.2f, p = %.4f\n", reg_pred_sub$QM, reg_pred_sub$QMp))
+  
+  if (reg_pred_sub$QMp < 0.05) {
+    cat("Significant differences between predictor types found.\n")
+    cat("\nPairwise comparisons (vs Clinical as reference):\n")
+    coefs <- summary(reg_pred_sub)$coefficients
+    for (i in 2:nrow(coefs)) {
+      cat(sprintf("  %s vs Clinical: β = %.3f (95%% CI: %.3f-%.3f), p = %.4f\n",
+                  rownames(coefs)[i], coefs[i,1], coefs[i,1] - 1.96*coefs[i,2],
+                  coefs[i,1] + 1.96*coefs[i,2], coefs[i,4]))
+    }
+  } else {
+    cat("No significant differences between predictor types.\n")
+  }
+}
+
+# ============================================================================
+# 5. TIME HORIZON SUBGROUP (meta_future.csv)
+# ============================================================================
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("META-REGRESSION 5: TIME HORIZON SUBGROUP (meta_future.csv)\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+data_horizon <- read.csv("meta_future.csv", stringsAsFactors = FALSE)
+data_horizon$se <- (data_horizon$UpperCI - data_horizon$LowerCI) / (2 * 1.96)
+data_horizon <- data_horizon[!is.na(data_horizon$se) & !is.na(data_horizon$AUC), ]
+
+# Clean horizon categories
+data_horizon$HorizonBin <- trimws(data_horizon$HorizonBin)
+horizon_order <- c("short-term", "medium-term", "long-term", "lifetime risk prediction")
+data_horizon$HorizonBin <- factor(data_horizon$HorizonBin, levels = horizon_order)
+
+cat("Horizon category distribution:\n")
+print(table(data_horizon$HorizonBin))
+
+# Option A: Treat horizon as categorical
+cat("\n=== Meta-regression: Time Horizon as Categorical ===\n")
+if (length(unique(data_horizon$HorizonBin)) > 1) {
+  data_horizon$HorizonFactor <- data_horizon$HorizonBin
+  data_horizon$HorizonFactor <- relevel(data_horizon$HorizonFactor, ref = "medium-term")
+  
+  reg_horizon_cat <- rma(yi = AUC, sei = se, mods = ~ HorizonFactor, data = data_horizon, method = "REML")
+  cat(sprintf("QM (test for overall horizon effect): %.2f, p = %.4f\n", reg_horizon_cat$QM, reg_horizon_cat$QMp))
+  
+  if (reg_horizon_cat$QMp < 0.05) {
+    cat("Significant differences between time horizons found.\n")
+  } else {
+    cat("No significant differences between time horizons.\n")
+  }
+}
+
+# Option B: Treat horizon as continuous (convert to numeric years)
+cat("\n=== Meta-regression: Time Horizon as Continuous (years) ===\n")
+# Convert horizon to approximate years
+data_horizon$HorizonYears <- NA
+data_horizon$HorizonYears[data_horizon$HorizonBin == "short-term"] <- 2  # midpoint of ≤3 years
+data_horizon$HorizonYears[data_horizon$HorizonBin == "medium-term"] <- 5  # midpoint of 3-7 years
+data_horizon$HorizonYears[data_horizon$HorizonBin == "long-term"] <- 9   # midpoint of >7 years
+data_horizon$HorizonYears[data_horizon$HorizonBin == "lifetime risk prediction"] <- 30  # approximate
+
+if (length(unique(data_horizon$HorizonYears)) > 1) {
+  reg_horizon_cont <- rma(yi = AUC, sei = se, mods = ~ HorizonYears, data = data_horizon, method = "REML")
+  cat(sprintf("QM (test for linear trend): %.2f, p = %.4f\n", reg_horizon_cont$QM, reg_horizon_cont$QMp))
+  cat(sprintf("Coefficient for Horizon Years: %.4f (95%% CI: %.4f-%.4f), p = %.4f\n",
+              reg_horizon_cont$b[2], reg_horizon_cont$ci.lb[2], reg_horizon_cont$ci.ub[2], reg_horizon_cont$pval[2]))
+  
+  if (reg_horizon_cont$b[2] < 0 && reg_horizon_cont$pval[2] < 0.05) {
+    cat("Interpretation: AUC significantly decreases as prediction horizon increases.\n")
+  } else if (reg_horizon_cont$pval[2] >= 0.05) {
+    cat("Interpretation: No significant linear relationship between horizon length and AUC.\n")
+  }
+}
+
+# ============================================================================
+# 6. SUMMARY TABLE OF RESULTS
+# ============================================================================
+
+cat("\n\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("SUMMARY OF META-REGRESSION RESULTS\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+summary_table <- data.frame(
+  Analysis = c(
+    "Main MA: Model Type",
+    "Main MA: Predictor Type", 
+    "Main MA: Validation Type",
+    "Validation Subgroup: Validation Type",
+    "Model Type Subgroup",
+    "Predictor Type Subgroup",
+    "Time Horizon (Categorical)",
+    "Time Horizon (Continuous)"
+  ),
+  QM = c(
+    ifelse(exists("reg_model"), round(reg_model$QM, 2), NA),
+    ifelse(exists("reg_predictor"), round(reg_predictor$QM, 2), NA),
+    ifelse(exists("reg_validation"), round(reg_validation$QM, 2), NA),
+    ifelse(exists("reg_val_main"), round(reg_val_main$QM, 2), NA),
+    ifelse(exists("reg_model_sub"), round(reg_model_sub$QM, 2), NA),
+    ifelse(exists("reg_pred_sub"), round(reg_pred_sub$QM, 2), NA),
+    ifelse(exists("reg_horizon_cat"), round(reg_horizon_cat$QM, 2), NA),
+    ifelse(exists("reg_horizon_cont"), round(reg_horizon_cont$QM, 2), NA)
+  ),
+  p_value = c(
+    ifelse(exists("reg_model"), round(reg_model$QMp, 4), NA),
+    ifelse(exists("reg_predictor"), round(reg_predictor$QMp, 4), NA),
+    ifelse(exists("reg_validation"), round(reg_validation$QMp, 4), NA),
+    ifelse(exists("reg_val_main"), round(reg_val_main$QMp, 4), NA),
+    ifelse(exists("reg_model_sub"), round(reg_model_sub$QMp, 4), NA),
+    ifelse(exists("reg_pred_sub"), round(reg_pred_sub$QMp, 4), NA),
+    ifelse(exists("reg_horizon_cat"), round(reg_horizon_cat$QMp, 4), NA),
+    ifelse(exists("reg_horizon_cont"), round(reg_horizon_cont$QMp, 4), NA)
+  ),
+  Significant = c(
+    ifelse(exists("reg_model") && reg_model$QMp < 0.05, "Yes", ifelse(exists("reg_model"), "No", NA)),
+    ifelse(exists("reg_predictor") && reg_predictor$QMp < 0.05, "Yes", ifelse(exists("reg_predictor"), "No", NA)),
+    ifelse(exists("reg_validation") && reg_validation$QMp < 0.05, "Yes", ifelse(exists("reg_validation"), "No", NA)),
+    ifelse(exists("reg_val_main") && reg_val_main$QMp < 0.05, "Yes", ifelse(exists("reg_val_main"), "No", NA)),
+    ifelse(exists("reg_model_sub") && reg_model_sub$QMp < 0.05, "Yes", ifelse(exists("reg_model_sub"), "No", NA)),
+    ifelse(exists("reg_pred_sub") && reg_pred_sub$QMp < 0.05, "Yes", ifelse(exists("reg_pred_sub"), "No", NA)),
+    ifelse(exists("reg_horizon_cat") && reg_horizon_cat$QMp < 0.05, "Yes", ifelse(exists("reg_horizon_cat"), "No", NA)),
+    ifelse(exists("reg_horizon_cont") && reg_horizon_cont$QMp < 0.05, "Yes", ifelse(exists("reg_horizon_cont"), "No", NA))
+  ),
+  stringsAsFactors = FALSE
+)
+
+print(summary_table)
+
+cat("\n\n✅ Meta-regression analyses complete!\n")
+cat("Interpretation guide:\n")
+cat("  - QM tests whether the moderator(s) explain significant heterogeneity\n")
+cat("  - p < 0.05 indicates the moderator significantly affects AUC\n")
+cat("  - Non-significant results suggest the moderator does not explain heterogeneity\n")
+
