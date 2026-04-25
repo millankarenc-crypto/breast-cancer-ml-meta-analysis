@@ -1,0 +1,298 @@
+############################################
+# Contour-Enhanced Funnel Plot for AUC Meta-analysis
+# Using metafor
+############################################
+
+# Install packages if needed
+if (!require("metafor")) install.packages("metafor")
+if (!require("readxl")) install.packages("readxl")
+if (!require("meta")) install.packages("meta")
+
+library(meta)
+library(metafor)
+library(dplyr)
+library(forestplot)
+library(grid)
+
+# =========================
+# 1. Load your dataset
+# =========================
+
+# Option A: CSV file
+dat <- read.csv("meta_auc.csv")
+
+# Check column names
+colnames(dat)
+
+# =========================
+# 2. Compute Standard Error from 95% CI
+# =========================
+
+# Formula: SE = (Upper - Lower) / (2 * 1.96)
+
+dat$sei <- (dat$UpperCI - dat$LowerCI) / (2 * 1.96)
+
+# Effect size = AUC
+dat$yi <- dat$AUC
+
+# Variance
+dat$vi <- dat$sei^2
+
+# =========================
+# 3. Random-effects meta-analysis
+# =========================
+
+res <- rma(yi = yi, vi = vi, data = dat, method = "REML")
+
+print(res)
+
+# =========================
+# 4. Standard funnel plot
+# =========================
+
+funnel(res,
+       xlab = "AUC",
+       ylab = "Standard Error",
+       main = "Standard Funnel Plot")
+
+# =========================
+# 5. Publication bias tests
+# =========================
+
+cat("\n========== PUBLICATION BIAS TESTS ==========\n")
+
+# Egger's test (linear regression method)
+cat("\n--- Egger's Test ---\n")
+egger_test <- regtest(res, model = "rma")
+print(egger_test)
+
+# Extract Egger's test results
+egger_intercept <- egger_test$zval
+egger_pvalue <- egger_test$pval
+egger_se <- attr(egger_test$zval, "se")
+
+cat("\nEgger's Test Interpretation:\n")
+if(egger_pvalue < 0.05) {
+  cat("Significant asymmetry detected (p < 0.05) - potential publication bias\n")
+} else {
+  cat("No significant asymmetry detected (p > 0.05) - no evidence of publication bias\n")
+}
+
+# Begg's test (rank correlation test)
+cat("\n--- Begg's Test ---\n")
+
+# Method 1: Using meta package for Begg's test
+# Create meta object for Begg's test
+meta_obj <- metagen(TE = yi, 
+                    seTE = sei,
+                    data = dat,
+                    studlab = dat$Study,
+                    comb.fixed = FALSE,
+                    comb.random = TRUE)
+
+# Perform Begg's test (rank correlation)
+begg_test <- metabias(meta_obj, method.bias = "rank", k.min = 3)
+
+# Extract results
+begg_tau <- begg_test$estimate[1]
+begg_pvalue <- begg_test$p.value
+
+cat(sprintf("Kendall's Tau: %.4f\n", begg_tau))
+cat(sprintf("p-value: %.4f\n", begg_pvalue))
+
+cat("\nBegg's Test Interpretation:\n")
+if(begg_pvalue < 0.05) {
+  cat("Significant correlation detected (p < 0.05) - potential publication bias\n")
+} else {
+  cat("No significant correlation detected (p > 0.05) - no evidence of publication bias\n")
+}
+
+# Method 2: Alternative Begg's test using base R (Kendall's correlation)
+cat("\n--- Alternative Begg's Test (Kendall's correlation) ---\n")
+# Calculate Kendall's tau between effect sizes and their standard errors
+kendall_test <- cor.test(dat$yi, dat$sei, method = "kendall")
+cat(sprintf("Kendall's Tau: %.4f\n", kendall_test$estimate))
+cat(sprintf("p-value: %.4f\n", kendall_test$p.value))
+
+if(kendall_test$p.value < 0.05) {
+  cat("Significant correlation detected (p < 0.05) - potential publication bias\n")
+} else {
+  cat("No significant correlation detected (p > 0.05) - no evidence of publication bias\n")
+}
+
+cat("=============================================\n\n")
+
+# =========================
+# 6. Create combined publication bias plot
+# =========================
+
+# Create a combined plot with funnel plot and test results
+png("Publication_Bias_Combined.png", width = 12, height = 6, units = "in", res = 300)
+
+# Set up 1x2 layout
+par(mfrow = c(1, 2), mar = c(4, 4, 4, 2), oma = c(0, 0, 2, 0))
+
+# Plot 1: Contour-enhanced funnel plot
+funnel(res,
+       level = c(90, 95, 99),
+       shade = c("white", "lightblue", "lightpink"),
+       xlab = "AUC",
+       ylab = "Standard Error",
+       main = "Contour-Enhanced Funnel Plot",
+       cex.main = 0.9,
+       cex.axis = 0.8,
+       cex.lab = 0.8)
+
+legend("topright",
+       legend = c("p > 0.10", "0.05 < p < 0.10", "p < 0.01"),
+       fill = c("white", "lightblue", "lightpink"),
+       cex = 0.7,
+       title = "Contour levels")
+
+mtext(paste0("k = ", nrow(dat), ", I² = ", round(res$I2, 1), "%"), 
+      side = 3, line = -1, cex = 0.7)
+
+# Plot 2: Egger's test plot (precision vs effect size)
+precision <- 1 / dat$sei
+effect_size <- dat$yi
+egger_lm <- lm(effect_size ~ precision)
+
+plot(precision, effect_size,
+     xlab = "Precision (1/Standard Error)",
+     ylab = "AUC",
+     main = "Egger's Test Plot",
+     pch = 19,
+     col = "cadetblue",
+     cex = 1.2,
+     cex.main = 0.9,
+     cex.axis = 0.8,
+     cex.lab = 0.8,
+     xlim = c(0, max(precision) * 1.1),
+     ylim = c(0.5, 1.0))
+
+abline(egger_lm, col = "hotpink3", lwd = 2)
+abline(h = res$b, col = "gray50", lty = 2, lwd = 1.5)
+
+# Add test results text
+text(x = max(precision) * 0.6, 
+     y = 0.55,
+     labels = sprintf("Egger's test:\nIntercept = %.4f\np = %.4f\n\nBegg's test:\nTau = %.4f\np = %.4f", 
+                      egger_intercept, egger_pvalue,
+                      begg_tau, begg_pvalue),
+     cex = 0.7,
+     col = "black")
+
+legend("bottomright",
+       legend = c("Observed studies", "Egger's regression line", "Pooled AUC (REML)"),
+       col = c("cadetblue", "hotpink3", "gray50"),
+       pch = c(19, NA, NA),
+       lty = c(NA, 1, 2),
+       lwd = c(NA, 2, 1.5),
+       cex = 0.7)
+
+# Add overall title
+mtext("Publication Bias Assessment - Overall Pooled Performance ", 
+      outer = TRUE, cex = 1.1, font = 2)
+
+dev.off()
+
+cat(" Combined publication bias plot saved as 'Publication_Bias_Combined.png'\n")
+
+# PDF version
+pdf("Publication_Bias_Combined.pdf", width = 12, height = 6)
+
+par(mfrow = c(1, 2), mar = c(4, 4, 4, 2), oma = c(0, 0, 2, 0))
+
+# Funnel plot
+funnel(res,
+       level = c(90, 95, 99),
+       shade = c("white", "lightblue", "lightpink"),
+       xlab = "AUC",
+       ylab = "Standard Error",
+       main = "Contour-Enhanced Funnel Plot",
+       cex.main = 0.9,
+       cex.axis = 0.8,
+       cex.lab = 0.8)
+
+legend("topright",
+       legend = c("p > 0.10", "0.05 < p < 0.10", "p < 0.01"),
+       fill = c("white", "lightblue", "lightpink"),
+       cex = 0.7,
+       title = "Contour levels")
+
+mtext(paste0("k = ", nrow(dat), ", I² = ", round(res$I2, 1), "%"), 
+      side = 3, line = -1, cex = 0.7)
+
+# Egger's test plot
+plot(precision, effect_size,
+     xlab = "Precision (1/Standard Error)",
+     ylab = "AUC",
+     main = "Egger's Test Plot",
+     pch = 19,
+     col = "cadetblue",
+     cex = 1.2,
+     cex.main = 0.9,
+     cex.axis = 0.8,
+     cex.lab = 0.8,
+     xlim = c(0, max(precision) * 1.1),
+     ylim = c(0.5, 1.0))
+
+abline(egger_lm, col = "hotpink3", lwd = 2)
+abline(h = res$b, col = "gray50", lty = 2, lwd = 1.5)
+
+text(x = max(precision) * 0.6, 
+     y = 0.55,
+     labels = sprintf("Egger's test:\nIntercept = %.4f\np = %.4f\n\nBegg's test:\nTau = %.4f\np = %.4f", 
+                      egger_intercept, egger_pvalue,
+                      begg_tau, begg_pvalue),
+     cex = 0.7,
+     col = "black")
+
+legend("bottomright",
+       legend = c("Observed studies", "Egger's regression line", "Pooled AUC (REML)"),
+       col = c("cadetblue", "hotpink3", "gray50"),
+       pch = c(19, NA, NA),
+       lty = c(NA, 1, 2),
+       lwd = c(NA, 2, 1.5),
+       cex = 0.7)
+
+mtext("Publication Bias Assessment - Main Meta-Analysis", 
+      outer = TRUE, cex = 1.1, font = 2)
+
+dev.off()
+
+cat(" Combined publication bias plot saved as 'Publication_Bias_Combined.pdf'\n")
+
+# =========================
+# 7. Export results to Excel (MINIMAL VERSION)
+# =========================
+
+library(writexl)
+
+# Create a simple dataframe with only essential results
+simple_results <- data.frame(
+  Test = c("Egger's Test", "Begg's Test"),
+  P_Value = c(
+    ifelse(is.null(egger_pvalue), NA, round(egger_pvalue, 4)),
+    ifelse(is.null(begg_pvalue), NA, round(begg_pvalue, 4))
+  ),
+  Intercept_or_Tau = c(
+    ifelse(is.null(egger_intercept), NA, round(egger_intercept, 4)),
+    ifelse(is.null(begg_tau), NA, round(begg_tau, 4))
+  ),
+  Publication_Bias = c(
+    ifelse(!is.null(egger_pvalue) && egger_pvalue < 0.05, "Yes", "No"),
+    ifelse(!is.null(begg_pvalue) && begg_pvalue < 0.05, "Yes", "No")
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Export to Excel
+write_xlsx(list("Publication_Bias_Tests" = simple_results), 
+           "publication_bias_results.xlsx")
+
+cat("\n Publication bias results exported to 'publication_bias_results.xlsx'\n")
+cat("\nExported results:\n")
+print(simple_results)
+
+
