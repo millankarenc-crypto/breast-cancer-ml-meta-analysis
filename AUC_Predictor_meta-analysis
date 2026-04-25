@@ -1,0 +1,306 @@
+# ============================================================================
+# COMPLETE WORKING CODE  ============================================================================
+
+library(metafor)
+library(forestplot)
+library(dplyr)
+library(grid)
+
+# Helper functions
+format_pval <- function(p) {
+  if (is.na(p)) return("p = NA")
+  if (p < 0.001) return("p < 0.001")
+  if (p < 0.01) return(sprintf("p = %.3f", p))
+  return(sprintf("p = %.3f", p))
+}
+
+run_begg_test <- function(yi, vi) {
+  tryCatch({
+    test <- cor.test(yi, vi, method = "kendall", exact = FALSE)
+    return(list(tau = as.numeric(test$estimate), p_value = as.numeric(test$p.value)))
+  }, error = function(e) {
+    return(list(tau = NA_real_, p_value = NA_real_))
+  })
+}
+
+# ============================================================================
+# 1. LOAD AND STANDARDIZE DATA
+# ============================================================================
+
+dat <- read.csv("meta_predictor.csv")
+
+# Standardize predictor types
+dat$PredictorType <- trimws(dat$PredictorType)
+dat$PredictorType[dat$PredictorType == "Clinical and Imaging"] <- "Clinical + Imaging"
+dat$PredictorType[dat$PredictorType == "Clinical and Genomic"] <- "Clinical + Genomic"
+
+cat("=== Predictor Type Counts ===\n")
+print(table(dat$PredictorType))
+
+# Subgroups with >=3 studies
+subgroups <- names(table(dat$PredictorType))[table(dat$PredictorType) >= 3]
+cat("\n=== Subgroups to analyze (k>=3) ===\n")
+print(subgroups)
+
+# ============================================================================
+# 2. RUN META-ANALYSIS FOR EACH SUBGROUP
+# ============================================================================
+
+subgroup_data <- list()
+subgroup_stats <- data.frame()
+
+for (subgroup in subgroups) {
+  sub_dat <- dat[dat$PredictorType == subgroup, ]
+  sub_dat$sei <- (sub_dat$UpperCI - sub_dat$LowerCI) / (2 * 1.96)
+  sub_dat$yi <- sub_dat$AUC
+  sub_dat$vi <- sub_dat$sei^2
+  
+  res <- tryCatch({
+    rma(yi = yi, vi = vi, data = sub_dat, method = "REML")
+  }, error = function(e) NULL)
+  
+  if (!is.null(res)) {
+    subgroup_stats <- rbind(subgroup_stats, data.frame(
+      Subgroup = subgroup, 
+      k = res$k, 
+      AUC = res$b, 
+      LowerCI = res$ci.lb, 
+      UpperCI = res$ci.ub,
+      p_value = res$pval, 
+      I2 = res$I2, 
+      tau2 = res$tau2,
+      QE = res$QE, 
+      QE_df = res$k - 1, 
+      QE_pval = res$QEp,
+      stringsAsFactors = FALSE
+    ))
+    subgroup_data[[subgroup]] <- list(studies = sub_dat, meta = res)
+    cat(sprintf("✓ %s: k=%d, AUC=%.3f\n", subgroup, res$k, res$b))
+  }
+}
+
+# ============================================================================
+# 3. FOREST PLOT
+# ============================================================================
+
+plot_data <- data.frame(label = character(), auc_ci = character(), auc = numeric(),
+                        lower = numeric(), upper = numeric(), is_summary = logical(),
+                        stringsAsFactors = FALSE)
+
+plot_data <- rbind(plot_data, data.frame(label = "Subgroup / Study", auc_ci = "AUC [95% CI]",
+                    auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+
+for (subgroup in subgroups) {
+  if (!is.null(subgroup_data[[subgroup]])) {
+    studies <- subgroup_data[[subgroup]]$studies
+    stats <- subgroup_stats[subgroup_stats$Subgroup == subgroup, ]
+    
+    plot_data <- rbind(plot_data, data.frame(label = paste0("  ", subgroup, " (k=", stats$k, ")"),
+                      auc_ci = "", auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+    
+    for(i in 1:nrow(studies)) {
+      plot_data <- rbind(plot_data, data.frame(label = paste0("    ", studies$Study[i]),
+                        auc_ci = sprintf("%.3f [%.3f, %.3f]", studies$AUC[i], studies$LowerCI[i], studies$UpperCI[i]),
+                        auc = studies$AUC[i], lower = studies$LowerCI[i], upper = studies$UpperCI[i], is_summary = FALSE))
+    }
+    
+    plot_data <- rbind(plot_data, data.frame(label = "    RE Model",
+                      auc_ci = sprintf("%.3f [%.3f, %.3f]", stats$AUC, stats$LowerCI, stats$UpperCI),
+                      auc = stats$AUC, lower = stats$LowerCI, upper = stats$UpperCI, is_summary = TRUE))
+    
+    plot_data <- rbind(plot_data, data.frame(label = paste0("    I² = ", round(stats$I2, 1), "%, τ² = ", sprintf("%.4f", stats$tau2),
+                      ", Q = ", sprintf("%.2f", stats$QE), " (df = ", stats$QE_df, "), ", format_pval(stats$QE_pval)),
+                      auc_ci = "", auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+    
+    plot_data <- rbind(plot_data, data.frame(label = "", auc_ci = "", auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+  }
+}
+
+labeltext_matrix <- cbind(plot_data$label, plot_data$auc_ci)
+
+base_fp <- forestplot(labeltext = labeltext_matrix, mean = plot_data$auc, lower = plot_data$lower,
+                      upper = plot_data$upper, clip = c(0.5, 1.0), vertices = TRUE, xlog = FALSE,
+                      boxsize = 0.2, col = fpColors(box = "royalblue", line = "darkblue", summary = "royalblue"),
+                      is.summary = plot_data$is_summary, xlab = "AUC", zero = 0.5, grid = TRUE,
+                      title = "Subgroup Meta-analysis by Predictor Type", xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+                      graph.pos = 3, txt_gp = fpTxtGp(label = gpar(cex = 0.85), summary = gpar(cex = 0.85, fontface = "bold")))
+
+final_plot <- base_fp %>% fp_set_style(box = "hotpink3", line = "lightsteelblue4", summary = "red4") %>% fp_set_zebra_style("#f9f9f9")
+
+pdf("subgroup_forest_plot_predictor.pdf", width = 14, height = 16)
+print(final_plot)
+dev.off()
+cat("\n✅ Forest plot saved\n")
+
+# ============================================================================
+# 4. FUNNEL PLOTS AND EGGER'S PLOTS - USING LIST AND SAFE CONVERSION
+# ============================================================================
+
+cat("\n\n=== Creating Funnel and Egger's Plots ===\n")
+
+# Store results as vectors (simpler, no list-of-lists issues)
+result_subgroup <- c()
+result_k <- c()
+result_Q_stat <- c()
+result_Q_pval <- c()
+result_Egger_p <- c()
+result_Egger_intercept <- c()
+result_Begg_tau <- c()
+result_Begg_p <- c()
+
+for (i in 1:nrow(subgroup_stats)) {
+  subgroup <- subgroup_stats$Subgroup[i]
+  k <- subgroup_stats$k[i]
+  res <- subgroup_data[[subgroup]]$meta
+  studies <- subgroup_data[[subgroup]]$studies
+  stats_row <- subgroup_stats[i, ]
+  
+  safe_name <- gsub(" ", "_", gsub("\\+", "plus", subgroup))
+  
+  cat(sprintf("\n--- %s (k=%d) ---\n", subgroup, k))
+  
+  # Begg's test
+  begg_result <- run_begg_test(studies$yi, studies$vi)
+  cat(sprintf("  Begg's test: tau = %.4f, p = %s\n", begg_result$tau, format_pval(begg_result$p_value)))
+  
+  # Funnel plot
+  funnel_pdf <- paste0("funnel_plot_", safe_name, ".pdf")
+  pdf(funnel_pdf, width = 8, height = 7)
+  funnel(res, level = c(90, 95, 99), shade = c("white", "lightblue", "lightpink"),
+         xlab = "AUC", ylab = "Standard Error", main = paste("Funnel Plot:", subgroup))
+  mtext(paste0("k = ", k, ", I² = ", round(res$I2, 1), "%, Q = ", sprintf("%.2f", stats_row$QE)),
+        side = 3, line = 0.5, cex = 0.7)
+  dev.off()
+  cat(sprintf("  ✓ Funnel plot: %s\n", funnel_pdf))
+  
+  # Initialize values for this subgroup
+  egger_p_val <- NA_real_
+  egger_intercept_val <- NA_real_
+  
+  # Egger's plot (only for k >= 10)
+  if (k >= 10) {
+    cat(sprintf("  🚀 Creating Egger's plot for %s (k=%d >=10)...\n", subgroup, k))
+    
+    egger_test <- tryCatch({
+      regtest(res, model = "rma")
+    }, error = function(e) {
+      cat(sprintf("  ❌ Egger's test error: %s\n", e$message))
+      return(NULL)
+    })
+    
+    if (!is.null(egger_test)) {
+      egger_p_val <- as.numeric(egger_test$pval)
+      egger_intercept_val <- as.numeric(egger_test$estimate[1])
+      
+      cat(sprintf("  ✅ Egger's test p = %.4f\n", egger_p_val))
+      
+      # Create plot
+      studies$precision <- 1 / studies$sei
+      egger_lm <- lm(yi ~ precision, data = studies, weights = 1/vi)
+      
+      egger_pdf <- paste0("egger_plot_", safe_name, ".pdf")
+      pdf(egger_pdf, width = 8, height = 7)
+      
+      plot(studies$precision, studies$yi,
+           xlab = "Precision (1/Standard Error)", ylab = "AUC",
+           main = paste("Egger's Regression Plot:", subgroup),
+           pch = 19, col = "steelblue", cex = 1.2,
+           xlim = c(0, max(studies$precision, na.rm = TRUE) * 1.05),
+           ylim = c(0.5, 1.0))
+      
+      abline(egger_lm, col = "darkred", lwd = 2)
+      abline(h = res$b, col = "gray50", lty = 2, lwd = 1.5)
+      
+      legend("bottomright",
+             legend = c(
+               paste0("Egger's test: p = ", sprintf("%.4f", egger_p_val)),
+               paste0("Intercept = ", sprintf("%.4f", egger_intercept_val)),
+               paste0("Begg's test: p = ", format_pval(begg_result$p_value)),
+               "",
+               "Red = Egger's regression",
+               "Dashed = Pooled AUC"
+             ),
+             bty = "o", bg = "white", cex = 0.7)
+      
+      dev.off()
+      cat(sprintf("  ✅ Egger's plot saved: %s\n", egger_pdf))
+      
+    } else {
+      cat(sprintf("  ❌ Egger's test failed for %s\n", subgroup))
+    }
+    
+  } else {
+    cat(sprintf("  ⚠️ Skipping Egger's plot: k=%d (<10)\n", k))
+  }
+  
+  # Store results as vectors (safe, no data.frame issues)
+  result_subgroup <- c(result_subgroup, subgroup)
+  result_k <- c(result_k, k)
+  result_Q_stat <- c(result_Q_stat, stats_row$QE)
+  result_Q_pval <- c(result_Q_pval, stats_row$QE_pval)
+  result_Egger_p <- c(result_Egger_p, egger_p_val)
+  result_Egger_intercept <- c(result_Egger_intercept, egger_intercept_val)
+  result_Begg_tau <- c(result_Begg_tau, begg_result$tau)
+  result_Begg_p <- c(result_Begg_p, begg_result$p_value)
+}
+
+# ============================================================================
+# 5. CREATE RESULTS DATA FRAME (SAFELY, AFTER ALL LOOPS)
+# ============================================================================
+
+publication_bias_results <- data.frame(
+  Subgroup = result_subgroup,
+  k = result_k,
+  Q_stat = result_Q_stat,
+  Q_pval = result_Q_pval,
+  Egger_p = result_Egger_p,
+  Egger_intercept = result_Egger_intercept,
+  Begg_tau = result_Begg_tau,
+  Begg_p = result_Begg_p,
+  stringsAsFactors = FALSE
+)
+
+# ============================================================================
+# 6. SAVE RESULTS
+# ============================================================================
+
+write.csv(subgroup_stats, "subgroup_analysis_results.csv", row.names = FALSE)
+write.csv(publication_bias_results, "publication_bias_assessment.csv", row.names = FALSE)
+
+cat("\n✓ Results saved to CSV files\n")
+
+# ============================================================================
+# 7. SUMMARY
+# ============================================================================
+
+cat("\n\n========================================\n")
+cat("SUMMARY\n")
+cat("========================================\n")
+cat("\nSubgroups analyzed:\n")
+print(subgroup_stats[, c("Subgroup", "k")])
+
+cat("\nEgger's plots created (k>=10):\n")
+egger_created <- publication_bias_results[!is.na(publication_bias_results$Egger_p), ]
+if (nrow(egger_created) > 0) {
+  print(egger_created[, c("Subgroup", "k", "Egger_p")])
+} else {
+  cat("  None. Subgroups with k>=10:\n")
+  k10_subgroups <- publication_bias_results[publication_bias_results$k >= 10, "Subgroup"]
+  if (length(k10_subgroups) > 0) {
+    cat(sprintf("  But these subgroups have k>=10: %s\n", paste(k10_subgroups, collapse=", ")))
+    cat("  Check if Egger's test failed silently.\n")
+  } else {
+    cat("  No subgroup has k>=10.\n")
+  }
+}
+
+cat("\n✅ Done!\n")
+cat("\nFiles created:\n")
+cat("  - subgroup_forest_plot_predictor.pdf\n")
+cat("  - funnel_plot_Imaging.pdf\n")
+cat("  - funnel_plot_Clinical_plus_Imaging.pdf\n")
+cat("  - egger_plot_Imaging.pdf (if k=10 and test succeeded)\n")
+cat("  - egger_plot_Clinical_plus_Imaging.pdf (if k=11 and test succeeded)\n")
+cat("  - subgroup_analysis_results.csv\n")
+cat("  - publication_bias_assessment.csv\n")
+
