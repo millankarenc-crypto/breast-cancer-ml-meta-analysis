@@ -1,0 +1,84 @@
+# ============================================================================
+# CREATE FOREST PLOT # ============================================================================
+
+# Prepare labeltext
+labeltext_matrix_model <- cbind(
+  plot_data_model$label_study,
+  plot_data_model$label_auc_ci
+)
+
+# Create and save forest plot without any lines
+pdf("model_subgroup_forest_plot.pdf", width = 16, height = 12)
+
+forestplot(
+  labeltext = labeltext_matrix_model,
+  mean = plot_data_model$auc,
+  lower = plot_data_model$lower,
+  upper = plot_data_model$upper,
+  clip = c(0.5, 1.0),
+  vertices = TRUE,
+  xlog = FALSE,
+  boxsize = 0.2,
+  is.summary = plot_data_model$is_summary,
+  xlab = "AUC",
+  zero = 0.5,
+  grid = TRUE,
+  title = "Subgroup Meta-analysis by Model Type: AUC of Breast Cancer Risk Prediction Models",
+  xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+  graph.pos = 2,
+  txt_gp = fpTxtGp(
+    label = gpar(cex = 0.75),
+    summary = gpar(cex = 0.8, fontface = "bold"),
+    xlab = gpar(cex = 1)
+  ),
+  col = fpColors(
+    box = "hotpink3",
+    line = "lightsteelblue4",
+    summary = "red4",
+    zero = "deeppink3"
+  ),
+  lineheight = unit(0.7, "cm"),
+  colgap = unit(0.4, "cm")
+)
+
+dev.off()
+cat("✅ Forest plot saved as 'model_subgroup_forest_plot.pdf' (no separator lines)\n")
+
+# PNG version
+png("model_subgroup_forest_plot.png", width = 16, height = 12, units = "in", res = 300)
+
+forestplot(
+  labeltext = labeltext_matrix_model,
+  mean = plot_data_model$auc,
+  lower = plot_data_model$lower,
+  upper = plot_data_model$upper,
+  clip = c(0.5, 1.0),
+  vertices = TRUE,
+  xlog = FALSE,
+  boxsize = 0.2,
+  is.summary = plot_data_model$is_summary,
+  xlab = "AUC",
+  zero = 0.5,
+  grid = TRUE,
+  title = "Subgroup Meta-analysis by Model Type: AUC of Breast Cancer Risk Prediction Models",
+  xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+  graph.pos = 2,
+  txt_gp = fpTxtGp(
+    label = gpar(cex = 0.75),
+    summary = gpar(cex = 0.8, fontface = "bold"),
+    xlab = gpar(cex = 1)
+  ),
+  col = fpColors(
+    box = "hotpink3",
+    line = "lightsteelblue4",
+    summary = "red4",
+    zero = "deeppink3"
+  ),
+  lineheight = unit(0.7, "cm"),
+  colgap = unit(0.4, "cm")
+)
+
+dev.off()
+cat("✅ Forest plot saved as 'model_subgroup_forest_plot.png' (no separator lines)\n")
+
+
