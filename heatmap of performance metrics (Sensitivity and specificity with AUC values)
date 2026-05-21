@@ -1,0 +1,116 @@
+# ============================================================================
+# HEATMAP WITH AUC LABELS ON THE RIGHT SIDE
+# Sensitivity and Specificity heatmap + AUC values as text on the right
+# Studies ordered by AUC (highest to lowest)
+# For studies without CI, adds "CI not reported"
+# ============================================================================
+
+# Load required libraries
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+
+# Read the CSV file
+data <- read.csv("Classification_M.csv", stringsAsFactors = FALSE)
+
+# Clean the data
+data_clean <- data %>%
+  mutate(
+    # Remove % sign and convert to numeric
+    Sensitivity = as.numeric(gsub("%", "", Sensitivity)),
+    Specificity = as.numeric(gsub("%", "", Specificity)),
+    # Convert AUC to numeric
+    AUC = as.numeric(AUC),
+    # Clean study name (remove quotes)
+    Study = gsub("\"", "", Study.Name),
+    # Format AUC with CI for display
+    AUC_display = case_when(
+      # If AUC is NA, show "NR"
+      is.na(AUC) ~ "None reported",
+      # If CI is missing or "Not reported", show AUC + "CR NR"
+      is.na(LowerCI) | LowerCI == "Not reported" | LowerCI == "" ~ sprintf("%.2f (CI NA)", AUC),
+      # If CI is available, show AUC with CI range
+      TRUE ~ sprintf("%.2f [%.2f-%.2f]", AUC, as.numeric(LowerCI), as.numeric(UpperCI))
+    )
+  ) %>%
+  filter(!is.na(Sensitivity) & !is.na(Specificity))
+
+# Order by AUC (highest to lowest) - place NA values at the bottom
+data_clean <- data_clean %>%
+  arrange(desc(AUC)) %>%
+  mutate(Study = factor(Study, levels = Study))
+
+# Display cleaned data
+cat("Loaded", nrow(data_clean), "studies\n")
+print(data_clean[, c("Study", "Sensitivity", "Specificity", "AUC_display")])
+
+# ============================================================================
+# CREATE HEATMAP WITH AUC LABELS ON THE RIGHT
+# ============================================================================
+
+# Melt for heatmap (Sensitivity and Specificity only)
+data_melt <- data_clean %>%
+  select(Study, Sensitivity, Specificity) %>%
+  melt(id.vars = "Study", variable.name = "Metric", value.name = "Percentage")
+
+# Create heatmap
+heatmap_plot <- ggplot(data_melt, aes(x = Metric, y = Study)) +
+  # Heatmap tiles
+  geom_tile(aes(fill = Percentage), color = "white", linewidth = 0.5) +
+  # Sensitivity and Specificity labels inside cells
+  geom_text(aes(label = sprintf("%.1f%%", Percentage)), size = 3.5, color = "black") +
+  # AUC labels on the right side (using geom_text with x = 3)
+  geom_text(data = data_clean, 
+            aes(x = 3, y = Study, label = AUC_display), 
+            size = 3.2, hjust = 0, vjust = 0.5, color = "black") +
+  # Color scale
+  scale_fill_gradient2(
+    low = "white",        # Values <40%
+    mid = "pink",     # Values 40-80%
+    high = "darkred", # Values >80%
+    midpoint = 60,
+    limits = c(0, 100),
+    name = "Value (%)"
+  ) +
+  # Expand x-axis to make room for AUC labels
+  scale_x_discrete(limits = c("Sensitivity", "Specificity", "AUC"),
+                   labels = c("Sensitivity", "Specificity", "AUC (95% CI)")) +
+  # Labels and titles
+  labs(
+    title = "Heatmap of Classification Measures with AUC by Study",
+    subtitle = "Studies ordered by AUC (lowest to highest) k=13",
+    x = "",
+    y = "Study Author, Year"
+  ) +
+  # Theme adjustments
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 11, face = "bold"),
+    axis.text.y = element_text(size = 9),
+    axis.title = element_text(size = 11),
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    panel.grid = element_blank()
+  )
+
+# Display the plot
+print(heatmap_plot)
+
+# Save as PNG (high resolution)
+ggsave("heatmap_with_auc_labels.png", 
+       plot = heatmap_plot, 
+       width = 11, 
+       height = 7.5, 
+       dpi = 300, 
+       units = "in")
+
+# Save as PDF (for publication)
+ggsave("heatmap_with_auc_labels.pdf", 
+       plot = heatmap_plot, 
+       width = 11, 
+       height = 7.5)
+
+cat("\n✅ Heatmap with AUC labels saved as 'heatmap_with_auc_labels.png' and '.pdf'\n")
