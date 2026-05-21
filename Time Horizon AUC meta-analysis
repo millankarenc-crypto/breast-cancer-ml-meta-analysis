@@ -20,63 +20,72 @@ data$var_logitAUC <- with(data, (SE^2) / (AUC^2 * (1 - AUC)^2))
 
 # ============================================================================
 # PERFORM META-ANALYSIS FOR EACH HORIZON BIN SUBGROUP
-# FIXED: Use rma() for correct I² calculation, but keep logit transformation
+# Skip long-term if fewer than 3 studies
 # ============================================================================
 
-horizon_levels <- c("short-term", "medium-term", "long-term", "lifetime risk prediction")
+# Only include horizons that actually exist in the data
+horizon_levels <- unique(data$HorizonBin)
+cat("Found horizons in data:", paste(horizon_levels, collapse=", "), "\n\n")
+
 meta_results <- list()
+long_term_studies <- NULL
 
 for(horizon in horizon_levels) {
   subset_data <- data[data$HorizonBin == horizon, ]
   
   if(nrow(subset_data) > 0) {
-    # Perform meta-analysis using metagen (for forest plot compatibility)
+    # Skip meta-analysis for long-term if fewer than 3 studies
+    if(horizon == "long-term" && nrow(subset_data) < 3) {
+      cat(sprintf("%s: Skipping MA (only %d studies, need at least 3)\n", 
+                  horizon, nrow(subset_data)))
+      long_term_studies <- subset_data
+      next
+    }
+    
+    # Perform meta-analysis using metagen
     ma_result <- metagen(TE = logitAUC, 
                          seTE = sqrt(var_logitAUC), 
                          studlab = Study,
                          data = subset_data,
                          sm = "PLOGIT",
                          backtransf = TRUE,
-                         method.random.ci = "HK",  # Hartung-Knapp adjustment
+                         method.random.ci = "HK",
                          method.tau = "REML",
                          prediction = TRUE,
                          common = FALSE,
                          random = TRUE)
     
-    # ========== FIX: Recalculate I² correctly using rma() ==========
-    # Run rma on raw AUC (not logit) to get correct I²
+    # Recalculate I² correctly using rma()
     rma_correct <- rma(yi = AUC, sei = SE, data = subset_data, method = "REML")
     
     # Override the incorrect I² from metagen with correct one from rma
     ma_result$I2 <- rma_correct$I2
-    ma_result$lower.I2 <- NULL  # Remove incorrect bounds
+    ma_result$lower.I2 <- NULL
     ma_result$upper.I2 <- NULL
-    
-    # Also override tau² if needed
     ma_result$tau2 <- rma_correct$tau2
+    ma_result$cochran_q <- rma_correct$QE
+    ma_result$cochran_p <- rma_correct$QEp
     
-    cat(sprintf("%s: metagen I² was %.1f%%, corrected to %.1f%% (rma)\n", 
-                horizon, 
-                ifelse(!is.null(ma_result$I2), ma_result$I2, 0),
-                rma_correct$I2))
+    cat(sprintf("%s: Corrected I² = %.1f%% (based on %d studies)\n", 
+                horizon, rma_correct$I2, nrow(subset_data)))
     
     meta_results[[horizon]] <- ma_result
   }
 }
 
 # ============================================================================
-# PREPARE DATA FOR FOREST PLOT WITH SUBGROUP HEADERS
+# PREPARE DATA FOR FOREST PLOT
 # ============================================================================
 
-# Create vectors for forestplot
-studies_vector <- character()
-mean_vector <- numeric()
-lower_vector <- numeric()
-upper_vector <- numeric()
-is_summary <- logical()
-row_types <- character()
-
-row_counter <- 0
+# Create data frame for plotting
+plot_data <- data.frame(
+  label = character(),
+  auc = numeric(),
+  lower = numeric(),
+  upper = numeric(),
+  is_summary = logical(),
+  stringsAsFactors = FALSE
+)
 
 for(i in 1:length(meta_results)) {
   horizon <- names(meta_results)[i]
@@ -86,132 +95,145 @@ for(i in 1:length(meta_results)) {
   re_label <- switch(horizon,
                      "short-term" = "RE for Short-term",
                      "medium-term" = "RE for Mid-term",
-                     "long-term" = "RE for Long-term",
-                     "lifetime risk prediction" = "RE for Lifetime risk prediction",
-                     paste("RE for", horizon, "")
+                     paste("RE for", horizon)
   )
   
   # Add subgroup header
-  row_counter <- row_counter + 1
-  studies_vector <- c(studies_vector, paste("", horizon, " (k=", ma_result$k, ")", sep=""))
-  mean_vector <- c(mean_vector, NA_real_)
-  lower_vector <- c(lower_vector, NA_real_)
-  upper_vector <- c(upper_vector, NA_real_)
-  is_summary <- c(is_summary, TRUE)
-  row_types <- c(row_types, "header")
+  plot_data <- rbind(plot_data, data.frame(
+    label = paste(horizon, "(k =", ma_result$k, ")"),
+    auc = NA,
+    lower = NA,
+    upper = NA,
+    is_summary = TRUE,
+    stringsAsFactors = FALSE
+  ))
   
   # Add individual studies
   for(j in 1:ma_result$k) {
-    row_counter <- row_counter + 1
-    studies_vector <- c(studies_vector, ma_result$studlab[j])
     auc_val <- exp(ma_result$TE[j]) / (1 + exp(ma_result$TE[j]))
     lower_val <- exp(ma_result$lower[j]) / (1 + exp(ma_result$lower[j]))
     upper_val <- exp(ma_result$upper[j]) / (1 + exp(ma_result$upper[j]))
     
-    mean_vector <- c(mean_vector, auc_val)
-    lower_vector <- c(lower_vector, lower_val)
-    upper_vector <- c(upper_vector, upper_val)
-    is_summary <- c(is_summary, FALSE)
-    row_types <- c(row_types, "study")
+    plot_data <- rbind(plot_data, data.frame(
+      label = ma_result$studlab[j],
+      auc = auc_val,
+      lower = lower_val,
+      upper = upper_val,
+      is_summary = FALSE,
+      stringsAsFactors = FALSE
+    ))
   }
   
-  # Add random effects model row with custom label
-  row_counter <- row_counter + 1
-  studies_vector <- c(studies_vector, re_label)
+  # Add random effects model row
   auc_re <- exp(ma_result$TE.random) / (1 + exp(ma_result$TE.random))
   lower_re <- exp(ma_result$lower.random) / (1 + exp(ma_result$lower.random))
   upper_re <- exp(ma_result$upper.random) / (1 + exp(ma_result$upper.random))
   
-  mean_vector <- c(mean_vector, auc_re)
-  lower_vector <- c(lower_vector, lower_re)
-  upper_vector <- c(upper_vector, upper_re)
-  is_summary <- c(is_summary, TRUE)
-  row_types <- c(row_types, "re")
+  plot_data <- rbind(plot_data, data.frame(
+    label = re_label,
+    auc = auc_re,
+    lower = lower_re,
+    upper = upper_re,
+    is_summary = TRUE,
+    stringsAsFactors = FALSE
+  ))
   
-  # Add heterogeneity statistics row (NOW WITH CORRECTED I²)
-  row_counter <- row_counter + 1
-  studies_vector <- c(studies_vector, 
-                      paste("I² = ", sprintf("%.1f%%", ma_result$I2), 
-                            ", τ² = ", sprintf("%.4f", ma_result$tau2), 
-                            ", p ", ifelse(ma_result$pval.Q < 0.001, "< 0.001", 
-                                           paste("=", sprintf("%.3f", ma_result$pval.Q))), sep = ""))
-  mean_vector <- c(mean_vector, NA_real_)
-  lower_vector <- c(lower_vector, NA_real_)
-  upper_vector <- c(upper_vector, NA_real_)
-  is_summary <- c(is_summary, FALSE)
-  row_types <- c(row_types, "het")
+  # Add simplified heterogeneity information row
+  if (!is.null(ma_result$cochran_p)) {
+    if (ma_result$cochran_p < 0.001) {
+      cochran_text <- sprintf("Q = %.2f (p < 0.001)", ma_result$cochran_q)
+    } else {
+      cochran_text <- sprintf("Q = %.2f (p = %.4f)", ma_result$cochran_q, ma_result$cochran_p)
+    }
+  } else {
+    if (ma_result$pval.Q < 0.001) {
+      cochran_text <- sprintf("Q = %.2f (p < 0.001)", ma_result$Q)
+    } else {
+      cochran_text <- sprintf("Q = %.2f (p = %.4f)", ma_result$Q, ma_result$pval.Q)
+    }
+  }
+  
+  het_text <- sprintf("I² = %.1f%%, τ² = %.4f, %s", 
+                      ma_result$I2, ma_result$tau2, cochran_text)
+  
+  plot_data <- rbind(plot_data, data.frame(
+    label = het_text,
+    auc = NA,
+    lower = NA,
+    upper = NA,
+    is_summary = FALSE,
+    stringsAsFactors = FALSE
+  ))
   
   # Add separator row (except after last subgroup)
   if(i < length(meta_results)) {
-    row_counter <- row_counter + 1
-    studies_vector <- c(studies_vector, " ")
-    mean_vector <- c(mean_vector, NA_real_)
-    lower_vector <- c(lower_vector, NA_real_)
-    upper_vector <- c(upper_vector, NA_real_)
-    is_summary <- c(is_summary, FALSE)
-    row_types <- c(row_types, "sep")
+    plot_data <- rbind(plot_data, data.frame(
+      label = " ",
+      auc = NA,
+      lower = NA,
+      upper = NA,
+      is_summary = FALSE,
+      stringsAsFactors = FALSE
+    ))
   }
 }
 
 # Create AUC with CI column
-auc_ci_column <- character()
-for(i in 1:length(mean_vector)) {
-  if(is.na(mean_vector[i])) {
-    auc_ci_column <- c(auc_ci_column, "")
-  } else {
-    auc_ci_column <- c(auc_ci_column, 
-                       sprintf("%.3f [%.3f, %.3f]", mean_vector[i], lower_vector[i], upper_vector[i]))
-  }
-}
+plot_data$auc_ci <- ifelse(is.na(plot_data$auc), "",
+                           sprintf("%.3f [%.3f, %.3f]", 
+                                   plot_data$auc, plot_data$lower, plot_data$upper))
 
-# Create label text matrix (2 columns: Study and AUC with CI)
-labeltext <- cbind(studies_vector, auc_ci_column)
+# Create label text matrix
+labeltext_matrix <- cbind(plot_data$label, plot_data$auc_ci)
 
 # ============================================================================
-# FIND APPROPRIATE X-AXIS LIMITS TO FIT ALL CONFIDENCE INTERVALS
+# FIND APPROPRIATE X-AXIS LIMITS
 # ============================================================================
 
 # Calculate min and max values for the x-axis
-all_values <- c(mean_vector, lower_vector, upper_vector)
-all_values <- all_values[!is.na(all_values)]
+all_auc_values <- plot_data$auc[!is.na(plot_data$auc)]
+all_lower_values <- plot_data$lower[!is.na(plot_data$lower)]
+all_upper_values <- plot_data$upper[!is.na(plot_data$upper)]
+all_values <- c(all_auc_values, all_lower_values, all_upper_values)
 
-# Set reasonable x-axis limits that include all data
-x_min <- max(0.1, min(all_values, na.rm = TRUE) - 0.05)
+# Set x-axis limits
+x_min <- max(0.5, min(all_values, na.rm = TRUE) - 0.05)
 x_max <- min(1.0, max(all_values, na.rm = TRUE) + 0.05)
 
-# Round to nearest 0.1 for clean axis ticks
-x_min <- floor(x_min * 10) / 10
-x_max <- ceiling(x_max * 10) / 10
+# Round to nearest 0.05 for clean axis ticks
+x_min <- floor(x_min * 20) / 20
+x_max <- ceiling(x_max * 20) / 20
 
 # Ensure we have reasonable limits
-x_min <- max(0.1, x_min)
+x_min <- max(0.5, x_min)
 x_max <- min(1.0, x_max)
 
-cat(paste("Setting x-axis limits to:", x_min, "-", x_max, "\n"))
-
 # Create appropriate x-ticks
-x_ticks <- seq(x_min, x_max, by = 0.1)
+x_ticks <- seq(round(x_min, 2), round(x_max, 2), by = 0.05)
+
+# Ensure we include 0.5 as a tick if it's within range
+if(0.5 >= x_min && 0.5 <= x_max && !(0.5 %in% x_ticks)) {
+  x_ticks <- sort(c(x_ticks, 0.5))
+}
+
+cat(paste("Setting x-axis limits to:", x_min, "-", x_max, "\n"))
+cat(paste("X-axis ticks:", paste(x_ticks, collapse=", "), "\n"))
 
 # ============================================================================
-# CREATE FOREST PLOT - PIPE VERSION WITH ADJUSTED X-AXIS
+# CREATE FOREST PLOT
 # ============================================================================
 
-# First create base plot WITHOUT hrzl_lines
-base_fp_horizon <- forestplot(
-  labeltext = labeltext,
-  mean = mean_vector,
-  lower = lower_vector,
-  upper = upper_vector,
+base_fp <- forestplot(
+  labeltext = labeltext_matrix,
+  mean = plot_data$auc,
+  lower = plot_data$lower,
+  upper = plot_data$upper,
   clip = c(x_min, x_max),
   vertices = TRUE,
   xlog = FALSE,
-  boxsize = 0.15,
-  col = fpColors(
-    box = "royalblue",
-    line = "darkblue",
-    summary = "royalblue"
-  ),
-  is.summary = is_summary,
+  boxsize = 0.2,
+  col = fpColors(box = "royalblue", line = "darkblue", summary = "royalblue"),
+  is.summary = plot_data$is_summary,
   xlab = "AUC",
   zero = 0.5,
   grid = TRUE,
@@ -225,51 +247,38 @@ base_fp_horizon <- forestplot(
   )
 )
 
-# Now apply formatting using the pipe operator - FIRST AS PDF
-pdf("horizon_bin_forest_plot_fixed_axis.pdf", width = 14, height = 12)
-
-# Create the plot step by step
-final_plot <- base_fp_horizon %>%
-  fp_add_lines(
-    "1" = gpar(lty = 1, lwd = 0.5),
-    "15" = gpar(lty = 1, lwd = 0.5),
-    "28" = gpar(lty = 1, lwd = 0.5),
-    "35" = gpar(lty = 1, lwd = 0.5)
-  ) %>%
-  fp_set_style(
-    box = "hotpink3",
-    line = "lightsteelblue4",
-    summary = "red4"
-  ) %>%
+# Apply the styling
+final_plot <- base_fp %>%
+  fp_set_style(box = "hotpink3", line = "lightsteelblue4", summary = "red4") %>%
   fp_set_zebra_style("#f9f9f9")
 
+# Display the plot
+print(final_plot)
+
+# Save as PDF
+pdf("horizon_bin_forest_plot.pdf", width = 14, height = 12)
 print(final_plot)
 dev.off()
-cat("✅ Horizon bin forest plot (PDF) saved as 'horizon_bin_forest_plot_fixed_axis.pdf'\n")
+cat("\n✅ Forest plot saved as 'horizon_bin_forest_plot.pdf'\n")
 
-# NOW AS PNG
-png("horizon_bin_forest_plot_fixed_axis.png", width = 1400, height = 1200, res = 150)
 
-final_plot_png <- base_fp_horizon %>%
-  fp_add_lines(
-    "1" = gpar(lty = 1, lwd = 0.5),
-    "20" = gpar(lty = 1, lwd = 0.5),
-    "35" = gpar(lty = 1, lwd = 0.5),
-    "41" = gpar(lty = 1, lwd = 0.5)
-  ) %>%
-  fp_set_style(
-    box = "hotpink3",
-    line = "lightsteelblue4",
-    summary = "red4"
-  ) %>%
-  fp_set_zebra_style("#f9f9f9")
+# Display the plot
+print(final_plot)
 
-print(final_plot_png)
+# Keep the plot window open
+if(interactive()) {
+  invisible(readline(prompt="Press [enter] to continue"))
+}
+
+
+# Save as PNG
+png("horizon_bin_forest_plot.png", width = 14, height = 12, units = "in", res = 300)
+print(final_plot)
 dev.off()
-cat("✅ Horizon bin forest plot (PNG) saved as 'horizon_bin_forest_plot_fixed_axis.png'\n")
+cat("✅ Forest plot saved as 'horizon_bin_forest_plot.png'\n")
 
 # ============================================================================
-# PRINT SUMMARY STATISTICS TO CONSOLE (WITH CORRECTED I²)
+# PRINT SUMMARY STATISTICS TO CONSOLE
 # ============================================================================
 
 cat("\n==============================================================\n")
@@ -283,8 +292,6 @@ for(i in 1:length(meta_results)) {
   re_label <- switch(horizon,
                      "short-term" = "RE for short-term",
                      "medium-term" = "RE for mid-term", 
-                     "long-term" = "RE for long-term",
-                     "lifetime risk prediction" = "RE for lifetime risk prediction",
                      paste("RE for", horizon)
   )
   
@@ -310,19 +317,43 @@ for(i in 1:length(meta_results)) {
             sprintf("%.3f", exp(ma_result$upper.random)/(1+exp(ma_result$upper.random))), 
             "]\n", sep = ""))
   
-  # NOW WITH CORRECTED I²
+  # Format Cochran's Q p-value for console
+  if (!is.null(ma_result$cochran_p)) {
+    if (ma_result$cochran_p < 0.001) {
+      cochran_console <- sprintf("Cochran's Q = %.2f (p < 0.001)", ma_result$cochran_q)
+    } else {
+      cochran_console <- sprintf("Cochran's Q = %.2f (p = %.4f)", ma_result$cochran_q, ma_result$cochran_p)
+    }
+  } else {
+    if (ma_result$pval.Q < 0.001) {
+      cochran_console <- sprintf("Cochran's Q = %.2f (p < 0.001)", ma_result$Q)
+    } else {
+      cochran_console <- sprintf("Cochran's Q = %.2f (p = %.4f)", ma_result$Q, ma_result$pval.Q)
+    }
+  }
+  
   cat(paste("\n**Heterogeneity**: I² = ", sprintf("%.1f%%", ma_result$I2), 
             ", τ² = ", sprintf("%.4f", ma_result$tau2), 
-            ", p ", ifelse(ma_result$pval.Q < 0.001, "< 0.001", 
-                           paste("= ", sprintf("%.3f", ma_result$pval.Q))), "\n", sep=""))
+            ", ", cochran_console, "\n", sep=""))
   
-  if(i < length(meta_results)) {
-    cat("\n---\n\n")
+  cat("\n---\n\n")
+}
+
+# Print long-term studies separately
+if(!is.null(long_term_studies)) {
+  cat("**long-term (k = 2) - No meta-analysis performed (insufficient studies)**\n")
+  cat("----------------------------------------\n")
+  for(j in 1:nrow(long_term_studies)) {
+    cat(paste("- ", long_term_studies$Study[j], ": ", 
+              sprintf("%.3f", long_term_studies$AUC[j]), " [", 
+              sprintf("%.3f", long_term_studies$LowerCI[j]), ", ", 
+              sprintf("%.3f", long_term_studies$UpperCI[j]), "]\n", sep=""))
   }
+  cat("\n")
 }
 
 # ============================================================================
-# CREATE SUMMARY CSV FILE (WITH CORRECTED I²)
+# CREATE SUMMARY CSV FILE
 # ============================================================================
 
 summary_data <- data.frame()
@@ -332,30 +363,56 @@ for(horizon in names(meta_results)) {
   re_label <- switch(horizon,
                      "short-term" = "RE for short-term",
                      "medium-term" = "RE for mid-term",
-                     "long-term" = "RE for long-term",
-                     "lifetime risk prediction" = "RE for lifetime risk prediction",
                      paste("RE for", horizon)
   )
   
+  # Get Cochran's Q and p-value
+  if (!is.null(ma_result$cochran_q)) {
+    cochran_q <- ma_result$cochran_q
+    cochran_p <- ma_result$cochran_p
+  } else {
+    cochran_q <- ma_result$Q
+    cochran_p <- ma_result$pval.Q
+  }
+  
   summary_row <- data.frame(
     Horizon = horizon,
-    RE_Label = re_label,
-    k = ma_result$k,
-    RE_AUC = sprintf("%.3f", exp(ma_result$TE.random)/(1+exp(ma_result$TE.random))),
+    Meta_Analysis_Performed = "Yes",
+    Number_of_Studies = ma_result$k,
+    Pooled_AUC = sprintf("%.3f", exp(ma_result$TE.random)/(1+exp(ma_result$TE.random))),
     CI_Lower = sprintf("%.3f", exp(ma_result$lower.random)/(1+exp(ma_result$lower.random))),
     CI_Upper = sprintf("%.3f", exp(ma_result$upper.random)/(1+exp(ma_result$upper.random))),
-    I2 = sprintf("%.1f%%", ma_result$I2),  # NOW CORRECTED
-    Tau2 = sprintf("%.4f", ma_result$tau2),
-    Q_p_value = ifelse(ma_result$pval.Q < 0.001, "<0.001", 
-                       sprintf("%.3f", ma_result$pval.Q)),
+    I_Squared = sprintf("%.1f%%", ma_result$I2),
+    Tau_Squared = sprintf("%.4f", ma_result$tau2),
+    Cochran_Q = sprintf("%.2f", cochran_q),
+    P_value = ifelse(cochran_p < 0.001, "<0.001", sprintf("%.4f", cochran_p)),
     stringsAsFactors = FALSE
   )
   
   summary_data <- rbind(summary_data, summary_row)
 }
 
-write.csv(summary_data, "horizon_subgroup_summary_fixed.csv", row.names = FALSE)
-cat("\n✅ Summary table saved as 'horizon_subgroup_summary_fixed.csv'\n")
+# Add long-term to summary without MA
+if(!is.null(long_term_studies)) {
+  summary_row <- data.frame(
+    Horizon = "long-term",
+    Meta_Analysis_Performed = "No (only 2 studies)",
+    Number_of_Studies = nrow(long_term_studies),
+    Pooled_AUC = "N/A",
+    CI_Lower = "N/A",
+    CI_Upper = "N/A",
+    I_Squared = "N/A",
+    Tau_Squared = "N/A",
+    Cochran_Q = "N/A",
+    P_value = "N/A",
+    stringsAsFactors = FALSE
+  )
+  
+  summary_data <- rbind(summary_data, summary_row)
+}
+
+write.csv(summary_data, "horizon_subgroup_summary.csv", row.names = FALSE)
+cat("\n✅ Summary table saved as 'horizon_subgroup_summary.csv'\n")
 
 # ============================================================================
 # FINAL OUTPUT SUMMARY
@@ -364,11 +421,15 @@ cat("\n✅ Summary table saved as 'horizon_subgroup_summary_fixed.csv'\n")
 cat("\n==============================================================\n")
 cat("FILES CREATED:\n")
 cat("==============================================================\n")
-cat("• horizon_bin_forest_plot_fixed_axis.pdf\n")
-cat("• horizon_bin_forest_plot_fixed_axis.png\n")
-cat("• horizon_subgroup_summary_fixed.csv\n")
+cat("• horizon_bin_forest_plot.pdf\n")
+cat("• horizon_bin_forest_plot.png\n")
+cat("• horizon_subgroup_summary.csv\n")
+cat("\nDATA SUMMARY:\n")
+cat(paste("  Total studies included:", nrow(data), "\n"))
+cat(paste("  Meta-analyses performed for:", paste(names(meta_results), collapse=", "), "\n"))
+if(!is.null(long_term_studies)) {
+  cat(paste("  Long-term studies (no MA):", paste(long_term_studies$Study, collapse=", "), "\n"))
+}
 cat("\nX-AXIS ADJUSTED TO FIT ALL CONFIDENCE INTERVALS:\n")
 cat(paste("  Limits:", x_min, "-", x_max, "\n"))
 cat(paste("  Ticks:", paste(x_ticks, collapse=", "), "\n"))
-
-
