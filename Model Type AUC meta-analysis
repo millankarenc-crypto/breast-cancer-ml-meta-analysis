@@ -1,84 +1,180 @@
 # ============================================================================
-# CREATE FOREST PLOT # ============================================================================
+# FOREST PLOT: SUBGROUP META-ANALYSIS BY MODEL TYPE (ML, DL, Hybrid)
+# Following the same format as the predictor type code
+# ============================================================================
 
-# Prepare labeltext
-labeltext_matrix_model <- cbind(
-  plot_data_model$label_study,
-  plot_data_model$label_auc_ci
-)
+library(metafor)
+library(forestplot)
+library(dplyr)
+library(grid)
 
-# Create and save forest plot without any lines
-pdf("model_subgroup_forest_plot.pdf", width = 16, height = 12)
+# Helper functions
+format_pval <- function(p) {
+  if (is.na(p)) return("p = NA")
+  if (p < 0.001) return("p < 0.001")
+  if (p < 0.01) return(sprintf("p = %.3f", p))
+  return(sprintf("p = %.3f", p))
+}
 
-forestplot(
-  labeltext = labeltext_matrix_model,
-  mean = plot_data_model$auc,
-  lower = plot_data_model$lower,
-  upper = plot_data_model$upper,
+# ============================================================================
+# 1. LOAD AND STANDARDIZE DATA
+# ============================================================================
+
+dat <- read.csv("meta_model.csv", stringsAsFactors = FALSE)
+
+# Clean up whitespace
+dat$ModelType <- trimws(dat$ModelType)
+
+# Standardize model type names (if needed)
+dat$ModelType[dat$ModelType == "Machine Learning"] <- "ML"
+dat$ModelType[dat$ModelType == "Deep Learning"] <- "DL"
+dat$ModelType[dat$ModelType == "Hybrid"] <- "Hybrid"
+
+cat("=== Model Type Counts ===\n")
+print(table(dat$ModelType))
+
+# Subgroups with >=3 studies (ML, DL, Hybrid all have >=3)
+subgroups <- names(table(dat$ModelType))[table(dat$ModelType) >= 3]
+cat("\n=== Subgroups to analyze (k>=3) ===\n")
+print(subgroups)
+
+# ============================================================================
+# 2. RUN META-ANALYSIS FOR EACH SUBGROUP
+# ============================================================================
+
+subgroup_data <- list()
+subgroup_stats <- data.frame()
+
+for (subgroup in subgroups) {
+  sub_dat <- dat[dat$ModelType == subgroup, ]
+  sub_dat$sei <- (sub_dat$UpperCI - sub_dat$LowerCI) / (2 * 1.96)
+  sub_dat$yi <- sub_dat$AUC
+  sub_dat$vi <- sub_dat$sei^2
+  
+  res <- tryCatch({
+    rma(yi = yi, vi = vi, data = sub_dat, method = "REML")
+  }, error = function(e) NULL)
+  
+  if (!is.null(res)) {
+    subgroup_stats <- rbind(subgroup_stats, data.frame(
+      Subgroup = subgroup, 
+      k = res$k, 
+      AUC = res$b, 
+      LowerCI = res$ci.lb, 
+      UpperCI = res$ci.ub,
+      p_value = res$pval, 
+      I2 = res$I2, 
+      tau2 = res$tau2,
+      QE = res$QE, 
+      QE_df = res$k - 1, 
+      QE_pval = res$QEp,
+      stringsAsFactors = FALSE
+    ))
+    subgroup_data[[subgroup]] <- list(studies = sub_dat, meta = res)
+    cat(sprintf("✓ %s: k=%d, AUC=%.3f\n", subgroup, res$k, res$b))
+  }
+}
+
+# ============================================================================
+# 3. FOREST PLOT
+# ============================================================================
+
+plot_data <- data.frame(label = character(), auc_ci = character(), auc = numeric(),
+                        lower = numeric(), upper = numeric(), is_summary = logical(),
+                        stringsAsFactors = FALSE)
+
+plot_data <- rbind(plot_data, data.frame(label = "Subgroup / Study", auc_ci = "AUC [95% CI]",
+                                         auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+
+for (subgroup in subgroups) {
+  if (!is.null(subgroup_data[[subgroup]])) {
+    studies <- subgroup_data[[subgroup]]$studies
+    stats <- subgroup_stats[subgroup_stats$Subgroup == subgroup, ]
+    
+    plot_data <- rbind(plot_data, data.frame(label = paste0("  ", subgroup, " Models (k=", stats$k, ")"),
+                                             auc_ci = "", auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+    
+    for(i in 1:nrow(studies)) {
+      plot_data <- rbind(plot_data, data.frame(label = paste0("    ", studies$Study[i]),
+                                               auc_ci = sprintf("%.3f [%.3f, %.3f]", studies$AUC[i], studies$LowerCI[i], studies$UpperCI[i]),
+                                               auc = studies$AUC[i], lower = studies$LowerCI[i], upper = studies$UpperCI[i], is_summary = FALSE))
+    }
+    
+    plot_data <- rbind(plot_data, data.frame(label = "    RE Model",
+                                             auc_ci = sprintf("%.3f [%.3f, %.3f]", stats$AUC, stats$LowerCI, stats$UpperCI),
+                                             auc = stats$AUC, lower = stats$LowerCI, upper = stats$UpperCI, is_summary = TRUE))
+    
+    plot_data <- rbind(plot_data, data.frame(label = paste0("    I² = ", round(stats$I2, 1), "%, τ² = ", sprintf("%.4f", stats$tau2),
+                                                            ", Q = ", sprintf("%.2f", stats$QE), " (df = ", stats$QE_df, "), ", format_pval(stats$QE_pval)),
+                                             auc_ci = "", auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+    
+    plot_data <- rbind(plot_data, data.frame(label = "", auc_ci = "", auc = NA, lower = NA, upper = NA, is_summary = TRUE))
+  }
+}
+
+# ============================================================================
+# 4. CREATE FOREST PLOT
+# ============================================================================
+
+labeltext_matrix <- cbind(plot_data$label, plot_data$auc_ci)
+
+base_fp <- forestplot(
+  labeltext = labeltext_matrix,
+  mean = plot_data$auc,
+  lower = plot_data$lower,
+  upper = plot_data$upper,
   clip = c(0.5, 1.0),
   vertices = TRUE,
   xlog = FALSE,
   boxsize = 0.2,
-  is.summary = plot_data_model$is_summary,
+  col = fpColors(box = "royalblue", line = "darkblue", summary = "royalblue"),
+  is.summary = plot_data$is_summary,
   xlab = "AUC",
   zero = 0.5,
   grid = TRUE,
   title = "Subgroup Meta-analysis by Model Type: AUC of Breast Cancer Risk Prediction Models",
   xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
-  graph.pos = 2,
+  graph.pos = 3,
   txt_gp = fpTxtGp(
-    label = gpar(cex = 0.75),
-    summary = gpar(cex = 0.8, fontface = "bold"),
+    label = gpar(cex = 0.85),
+    summary = gpar(cex = 0.85, fontface = "bold"),
     xlab = gpar(cex = 1)
-  ),
-  col = fpColors(
-    box = "hotpink3",
-    line = "lightsteelblue4",
-    summary = "red4",
-    zero = "deeppink3"
-  ),
-  lineheight = unit(0.7, "cm"),
-  colgap = unit(0.4, "cm")
+  )
 )
 
+final_plot <- base_fp %>%
+  fp_set_style(box = "hotpink3", line = "lightsteelblue4", summary = "red4") %>%
+  fp_set_zebra_style("#f9f9f9")
+
+# Save as PDF
+pdf("model_subgroup_forest_plot.pdf", width = 14, height = 12)
+print(final_plot)
 dev.off()
-cat("✅ Forest plot saved as 'model_subgroup_forest_plot.pdf' (no separator lines)\n")
+cat("\n✅ Forest plot saved as 'model_subgroup_forest_plot.pdf'\n")
 
-# PNG version
-png("model_subgroup_forest_plot.png", width = 16, height = 12, units = "in", res = 300)
-
-forestplot(
-  labeltext = labeltext_matrix_model,
-  mean = plot_data_model$auc,
-  lower = plot_data_model$lower,
-  upper = plot_data_model$upper,
-  clip = c(0.5, 1.0),
-  vertices = TRUE,
-  xlog = FALSE,
-  boxsize = 0.2,
-  is.summary = plot_data_model$is_summary,
-  xlab = "AUC",
-  zero = 0.5,
-  grid = TRUE,
-  title = "Subgroup Meta-analysis by Model Type: AUC of Breast Cancer Risk Prediction Models",
-  xticks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
-  graph.pos = 2,
-  txt_gp = fpTxtGp(
-    label = gpar(cex = 0.75),
-    summary = gpar(cex = 0.8, fontface = "bold"),
-    xlab = gpar(cex = 1)
-  ),
-  col = fpColors(
-    box = "hotpink3",
-    line = "lightsteelblue4",
-    summary = "red4",
-    zero = "deeppink3"
-  ),
-  lineheight = unit(0.7, "cm"),
-  colgap = unit(0.4, "cm")
-)
-
+# Save as PNG
+png("model_subgroup_forest_plot.png", width = 14, height = 12, units = "in", res = 300)
+print(final_plot)
 dev.off()
-cat("✅ Forest plot saved as 'model_subgroup_forest_plot.png' (no separator lines)\n")
+cat("✅ Forest plot saved as 'model_subgroup_forest_plot.png'\n")
 
+# Display the plot
+print(final_plot)
 
+# ============================================================================
+# 5. PRINT SUMMARY STATISTICS
+# ============================================================================
+
+cat("\n========================================\n")
+cat("SUBGROUP META-ANALYSIS SUMMARY BY MODEL TYPE\n")
+cat("========================================\n\n")
+
+for (i in 1:nrow(subgroup_stats)) {
+  stats <- subgroup_stats[i, ]
+  cat(sprintf("\n%s Models (k = %d):\n", stats$Subgroup, stats$k))
+  cat(sprintf("  Pooled AUC: %.3f (95%% CI: %.3f-%.3f)\n", stats$AUC, stats$LowerCI, stats$UpperCI))
+  cat(sprintf("  I²: %.1f%%\n", stats$I2))
+  cat(sprintf("  τ²: %.4f\n", stats$tau2))
+  cat(sprintf("  Q-test: %.2f (df = %d), %s\n", stats$QE, stats$QE_df, format_pval(stats$QE_pval)))
+  cat("  ----------------------------------------\n")
+}
